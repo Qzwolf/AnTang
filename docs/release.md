@@ -15,6 +15,8 @@ bash scripts/build-android-local
 
 properties 包含 `storePassword`、`keyAlias`、`keyPassword`。构建脚本将 `scripts/android-version --apply` 的单调版本号写入 app.json，prebuild 和 Gradle 使用同一明确地址。已有 EAS 流程仍沿用其远端版本管理；不要在两个渠道混发未经核对的版本和签名。
 
+**环境由地址决定，别手写。** `apps/mobile/app.config.js` 按 `EAS_BUILD_PROFILE` 决定应用名与 `appEnvironment`（production / preview / development），而 `apps/mobile/src/config.ts` 在模块加载时就会检查：「非 production 环境 + 生产地址」直接抛错——包会一开就闪退。`scripts/build-android-local` 因此不再依赖外部变量：`EXPO_PUBLIC_API_URL` 指向 `82.157.48.200` 时强制 `EAS_BUILD_PROFILE=production`，指向本机隧道时保持 `development`；显式写 `production` 却给了非生产地址会直接退出。构建输出会打印实际使用的 profile，打包日志里对不上就是配错了。
+
 ## GitHub Actions 构建
 
 `.github/workflows/android-release.yml` 为手动或 `v*` 标签触发。目标仓库需配置下列 Secrets，不能假设 fork 的配置会自动继承：

@@ -33,9 +33,26 @@ key_password="$(read_value keyPassword)"
 arch="${ANDROID_ARCH:-arm64-v8a}"
 : "${EXPO_PUBLIC_API_URL:?缺少 EXPO_PUBLIC_API_URL；审核包须明确选择本机隧道地址，正式发布才使用生产地址}"
 api_url="$EXPO_PUBLIC_API_URL"
+api_host="$(printf '%s' "$api_url" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/:]+).*#\1#')"
+
+# app.config.js 按 EAS_BUILD_PROFILE 判断环境：production 才允许连生产地址，其余环境由
+# apps/mobile/src/config.ts 在启动时拦下线上地址（模块加载即抛错，包会一开就闪退）。
+# 这里按地址自动选：生产地址强制 production，本机隧道地址保持 development。
+if [ "$api_host" = "82.157.48.200" ]; then
+    EAS_BUILD_PROFILE=production
+else
+    EAS_BUILD_PROFILE="${EAS_BUILD_PROFILE:-development}"
+fi
+export EAS_BUILD_PROFILE
+
+if [ "$EAS_BUILD_PROFILE" = "production" ] && [ "$api_host" != "82.157.48.200" ]; then
+    echo "production 包必须连接生产地址，当前是 $api_host" >&2
+    exit 1
+fi
 
 echo "versionCode: $(cd "$root" && ./scripts/android-version --apply)"
 echo "api url    : $api_url"
+echo "profile    : $EAS_BUILD_PROFILE"
 echo "keystore   : $ANTANG_KEYSTORE"
 
 export EXPO_PUBLIC_API_URL="$api_url"
@@ -43,7 +60,7 @@ cd "$mobile"
 [ -d node_modules ] || npm ci
 npx --yes expo prebuild --platform android --no-install --clean
 cd android
-EXPO_PUBLIC_API_URL="$api_url" NODE_ENV=production \
+EXPO_PUBLIC_API_URL="$api_url" EAS_BUILD_PROFILE="$EAS_BUILD_PROFILE" NODE_ENV=production \
     ./gradlew assembleRelease \
     -PreactNativeArchitectures="$arch" \
     -Pandroid.injected.signing.store.file="$ANTANG_KEYSTORE" \
