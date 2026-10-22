@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# 把一个打好的 APK 发布到 /download/，并写清单 latest.json。
+#
+# 为什么要单独一步：构建（CI 或本机）和发布分开，出包不会自动影响正在使用的用户；
+# 你想「先打出来、下周再发」，就只跑构建、不跑这个脚本。
+#
+# 清单里除了原来的版本号、大小、sha256，还记两件事：
+#   built_from_commit  这个包是用哪个源码提交打的（scripts/android-version 写进 app.json）
+#   features           这版打开了哪些功能开关
+# 这样「某台手机装的是哪份代码、包里有什么」都能查，而不是靠谁记得。
+#
+#   ./scripts/publish-apk path/to/app-release.apk
+#
+# 环境变量：
+#   ANTANG_RELEASE_NOTES     更新说明（必填，患者看得到）
+#   ANTANG_RELEASE_FEATURES  功能开关清单，逗号分隔，例如 "voice:off,glucose-log:on"
+#   ANTANG_PUBLISH_TARGET    上传目标，例如 ubuntu@82.157.48.200:/var/www/antang-download
+#                            （不设就只写本地 dist/，打印手动上传命令）
+#   ANTANG_PUBLIC_BASE       下载地址前缀，默认 https://82.157.48.200:8000/download
+set -euo pipefail
+
+apk="${1:-}"
+[ -n "$apk" ] || { echo "用法：$0 <apk 路径>" >&2; exit 1; }
+[ -f "$apk" ] || { echo "找不到 APK：$apk" >&2; exit 1; }
+
+notes="${ANTANG_RELEASE_NOTES:?缺少 ANTANG_RELEASE_NOTES（患者会看到这段说明）}"
+features="${ANTANG_RELEASE_FEATURES:-}"
+target="${ANTANG_PUBLISH_TARGET:-}"
+public_base="${ANTANG_PUBLIC_BASE:-https://82.157.48.200:8000/download}"
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+app_json="$root/apps/mobile/app.json"
+dist="$root/dist"
+mkdir -p "$dist"
+
+read -r version_name version_code build_commit < <(
+    python3 - "$app_json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    expo = json.load(handle)["expo"]
+print(
+    expo["version"],
+    expo["android"]["versionCode"],
+    expo.get("extra", {}).get("buildCommit", "unbuilt"),
+)
+PY
+)
+
+apk_name="antang-${version_code}.apk"
+cp "$apk" "$dist/$apk_name"
+size="$(wc -c < "$dist/$apk_name" | tr -d ' ')"
+sha="$(sha256sum "$dist/$apk_name" | cut -d' ' -f1)"
+
+FEATURES="$features" python3 - "$dist/latest.json" "$version_name" "$version_code" \
+    "$apk_name" "$public_base" "$sha" "$size" "$build_commit" "$notes" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+path, name, code, apk_name, base, sha, size, commit, notes = sys.argv[1:10]
+features = [item.strip() for item in os.environ.get("FEATURES", "").split(",") if item.strip()]
+manifest = {
+    "version_name": name,
+    "version_code": int(code),
+    "apk_name": apk_name,
+    "apk_url": f"{base}/{apk_name}",
+    "sha256": sha,
+    "size_bytes": int(size),
+    "released_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
+    "notes": notes,
+    "built_from_commit": commit,
+    "features": features,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+print(json.dumps(manifest, ensure_ascii=False, indent=2))
+PY
+
+if [ -n "$target" ]; then
+    scp -q "$dist/$apk_name" "$dist/latest.json" "$target/"
+    echo "已发布到 $target"
+else
+    echo "本地已就绪（未上传）：$dist/$apk_name"
+    echo "上传：scp $dist/$apk_name $dist/latest.json ubuntu@82.157.48.200:/var/www/antang-download/"
+fi

@@ -2,7 +2,13 @@ import { checkForUpdate, parseRelease } from './release';
 
 jest.mock('expo-constants', () => ({
   __esModule: true,
-  default: { expoConfig: { version: '1.0.0', android: { versionCode: 26101901 } } },
+  default: {
+    expoConfig: {
+      version: '1.0.0',
+      android: { versionCode: 26101901 },
+      extra: { buildCommit: 'bc7c320e7600' },
+    },
+  },
 }));
 
 const manifest = {
@@ -23,7 +29,20 @@ describe('parseRelease', () => {
       sha256: 'a'.repeat(64),
       sizeBytes: 48926749,
       notes: '新增量表入口',
+      builtFromCommit: null,
+      features: [],
     });
+  });
+
+  it('keeps the source commit and feature list when the manifest has them', () => {
+    const parsed = parseRelease({
+      ...manifest,
+      built_from_commit: 'c3ea943a1234',
+      features: ['voice:off', 'glucose-log:on', 42],
+    });
+    expect(parsed.builtFromCommit).toBe('c3ea943a1234');
+    // 非字符串的项丢掉，不让坏清单把界面搞崩。
+    expect(parsed.features).toEqual(['voice:off', 'glucose-log:on']);
   });
 
   it('rejects a missing field instead of guessing', () => {

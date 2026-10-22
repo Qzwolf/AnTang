@@ -36,6 +36,8 @@ const release: ReleaseInfo = {
   sha256: 'a'.repeat(64),
   sizeBytes: 10,
   notes: '',
+  builtFromCommit: null,
+  features: [],
 };
 
 const downloadMock = FileSystem.createDownloadResumable as jest.Mock;

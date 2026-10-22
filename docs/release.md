@@ -29,10 +29,26 @@ properties 包含 `storePassword`、`keyAlias`、`keyPassword`。构建脚本将
 
 先在 app.json 确认并提交新 versionCode，再触发云构建。构建只产生 artifact，不会自动上传服务器或影响存量用户。
 
+`./scripts/android-version --apply` 除了分配 versionCode，还会把当前的源码提交（`git rev-parse --short=12 HEAD`）写进 `apps/mobile/app.json` 的 `expo.extra.buildCommit`。发布时这个值进入清单的 `built_from_commit`，所以「装在某台手机上的是哪份代码」可以按版本号查回来。
+
 ## 更新检查与分发
 
 患者侧边栏的「检查更新」读取所选后端地址的 `/download/latest.json`，比较 versionCode，确认后可在应用内下载并交给 Android 系统安装器；权限不足或安装器启动失败会明确报错。清单不可用会明确报错。
 
-本仓库没有可执行的 APK 上传发布脚本；不能根据旧分支文档中的 `publish-apk.ps1` 假设它存在。由维护者先核对 APK 的签名、包名、versionCode、API 地址和 SHA256，再上传审核过的文件与清单。清单字段为 `version_name`、`version_code`、`apk_url`、`sha256`、`size_bytes`、`notes`；清单版本必须与 APK 一致且大于已发布版本。Android 安装仍由用户确认。
+**患者看到的是版本号，不是提交号。** 界面上只有「当前版本 1.0.0」这一行；`built_from_commit` 与 `features` 只在清单里，供维护者排查「某台手机装的是哪份代码、这版开了哪些开关」。
 
-作者后续更新增加了 `expo-intent-launcher` 安装器入口和安装未知应用权限。缓存下载目前只核对文件大小，端上未计算 SHA256；发布端仍需校验 APK 哈希和团队签名。这些改动需要重新编译安装包，尚未真机验收。
+发布用 `./scripts/publish-apk <apk>`：
+
+```bash
+ANTANG_RELEASE_NOTES="修好了检查更新，加回沟通方式卡片" \
+ANTANG_RELEASE_FEATURES="voice:off,glucose-log:on" \
+ANTANG_PUBLISH_TARGET=ubuntu@82.157.48.200:/var/www/antang-download \
+./scripts/publish-apk apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+```
+
+- 不设 `ANTANG_PUBLISH_TARGET` 就只写到仓库的 `dist/` 并打印上传命令——这样「先打出来、下周再发」不用改代码。
+- 脚本会算 sha256 与字节数、按 `<versionCode>` 命名 APK、写清单；`features` 建议写成 `功能:on|off` 的形式，和 `apps/mobile/src/config.ts` 的开关对应。
+- 清单字段：`version_name`、`version_code`、`apk_name`、`apk_url`、`sha256`、`size_bytes`、`released_at`、`notes`、`built_from_commit`、`features`。清单版本必须与 APK 一致且大于已发布版本。
+- 服务器上的下载目录是 `/var/www/antang-download/`（nginx `infra/nginx/antang.conf` 的 `/download/`），`index.html` 是给人看的下载页。
+
+Android 安装仍由用户确认。作者后续更新增加了 `expo-intent-launcher` 安装器入口和安装未知应用权限。缓存下载目前只核对文件大小，端上未计算 SHA256；发布端仍需校验 APK 哈希和团队签名。这些改动需要重新编译安装包，尚未真机验收。

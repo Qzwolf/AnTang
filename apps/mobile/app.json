@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.antang.app",
-      "versionCode": 26102001,
+      "versionCode": 26102201,
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.health.READ_STEPS",
@@ -45,7 +45,8 @@
     "extra": {
       "eas": {
         "projectId": "d04128ba-7ddd-4df4-a952-d52a8a9bea68"
-      }
+      },
+      "buildCommit": "cb8814f53068"
     },
     "plugins": [
       "expo-secure-store",
