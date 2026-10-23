@@ -1,5 +1,6 @@
 import {
   ArrowRight01Icon,
+  BloodIcon,
   FolderHeartIcon,
   Message01Icon,
   Settings04Icon,
@@ -290,8 +291,8 @@ export function AppMenu({
               pressed && styles.healthEntryPressed,
             ]}
           >
-            <View style={styles.healthIcon}>
-              <AppIcon color={colors.primaryPressed} icon={ChartLineData01Icon} size={26} />
+            <View style={[styles.healthIcon, styles.glucoseIcon]}>
+              <AppIcon color="#B25F2A" icon={BloodIcon} size={26} />
             </View>
             <View style={styles.healthCopy}>
               <Text style={styles.healthTitle}>血糖记录</Text>
@@ -373,8 +374,10 @@ export function AppMenu({
                         pressed && styles.conversationPressed,
                       ]}
                     >
-                      <Text style={styles.conversationTime}>{conversation.time}</Text>
-                      <Text numberOfLines={1} style={styles.conversationPreview}>
+                      <Text style={styles.conversationTime}>
+                        {conversation.time}
+                      </Text>
+                      <Text numberOfLines={2} style={styles.conversationPreview}>
                         {conversation.preview}
                       </Text>
                     </Pressable>
@@ -495,6 +498,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     backgroundColor: colors.paper,
   },
+  glucoseIcon: { backgroundColor: '#FBEEE2' },
   healthCopy: { flex: 1, gap: 3 },
   healthTitle: {
     color: colors.ink,
@@ -602,32 +606,38 @@ const styles = StyleSheet.create({
   },
   groupTitle: {
     paddingHorizontal: spacing.xs,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
-    color: colors.faint,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxs,
+    color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
     fontSize: 12,
+    letterSpacing: 0.4,
   },
   conversation: {
-    minHeight: 46,
+    alignItems: 'flex-start',
+    backgroundColor: colors.paper,
+    borderRadius: radii.sm,
     flexDirection: 'row',
-    alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.xs,
-    borderRadius: radii.md,
+    marginBottom: 6,
+    minHeight: 58,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   conversationPressed: { backgroundColor: colors.paperMuted },
   conversationTime: {
-    width: 42,
     color: colors.faint,
     fontFamily: typefaces.sans,
-    fontSize: 12,
+    fontSize: 11,
     fontVariant: ['tabular-nums'],
+    lineHeight: 20,
+    width: 40,
   },
   conversationPreview: {
-    flex: 1,
     color: colors.text,
+    flex: 1,
     fontFamily: typefaces.sans,
     fontSize: 14,
+    lineHeight: 20,
   },
 });

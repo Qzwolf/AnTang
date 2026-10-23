@@ -105,8 +105,28 @@ export class SessionChangedError extends Error {
   }
 }
 
+/**
+ * 手机系统服务（华为健康、Health Connect、HMS）抛出来的是英文原生异常，
+ * 患者既看不懂也不知道下一步做什么。这里把已知的几类换成能行动的中文；
+ * 原始错误仍保留在 message 之外（调用方可在日志里拿到原始异常对象）。
+ */
+export function friendlyNativeError(message: string): string | null {
+  if (
+    /Binding to service failed|MISSING_INSTANCEID_SERVICE|Fetching the token failed/i.test(
+      message,
+    )
+  ) {
+    return "这台手机暂时连不上健康服务。装了「华为运动健康」的话，先在系统里打开并登录一次再试；也可以先用侧边栏的「华为手环导入」直接选导出的文件。";
+  }
+  if (/(java|kotlin)\.[A-Za-z.]*(Exception|Error)|ExecutionException/i.test(message)) {
+    return "手机的系统服务返回了错误，稍后再试一次。";
+  }
+  return null;
+}
+
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "发生了未知错误";
+  if (!(error instanceof Error)) return "发生了未知错误";
+  return friendlyNativeError(error.message) ?? error.message;
 }
 
 async function responseJson(response: FetchResponse): Promise<unknown> {
