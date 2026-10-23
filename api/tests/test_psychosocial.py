@@ -179,9 +179,11 @@ async def test_assessment_round_trip(db_session: AsyncSession) -> None:
         )
         assert created.status_code == 201
         body = created.json()
+        # 分数仍随响应返回，是为了让 26102301 及更早的安装包能解析；界面上不渲染。
+        # 真正的收窄（只回 assessed_at / instrument / weekly_contact_limit）等宽容
+        # 解析的包换上去之后再删字段，届时这几条断言一并改回「不返回分数」。
         assert body["fear_percent"] == 50
         assert body["fear_high"] is True
-        assert body["awareness"] == "impaired"
         assert body["quadrant"] == "high_fear_impaired_awareness"
         assert body["weekly_contact_limit"] == 4
         assert datetime.fromisoformat(body["assessed_at"]) == assessed_at
@@ -191,7 +193,8 @@ async def test_assessment_round_trip(db_session: AsyncSession) -> None:
             headers=headers,
         )
         assert latest.status_code == 200
-        assert latest.json()["quadrant"] == "high_fear_impaired_awareness"
+        assert latest.json()["weekly_contact_limit"] == 4
+        assert latest.json()["fear_percent"] == 50
 
 
 async def test_the_server_scores_the_answers_it_asked_for(db_session: AsyncSession) -> None:
@@ -305,7 +308,7 @@ async def test_latest_assessment_wins_by_assessed_at(db_session: AsyncSession) -
             "/api/v1/health-profile/psychosocial-assessment",
             headers=headers,
         )
-        assert latest.json()["gold_score"] == 7
+        assert latest.json()["weekly_contact_limit"] == 5
         assert latest.json()["quadrant"] == "low_fear_impaired_awareness"
 
 

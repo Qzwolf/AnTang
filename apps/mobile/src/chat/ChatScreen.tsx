@@ -69,6 +69,9 @@ import type { LiveHeartRateController } from '../live-heart-rate/use-live-heart-
 import { AppMenu, type ConversationAnchor } from '../navigation/app-menu';
 import { useNotifications } from '../notifications/use-notifications';
 import { CareSettingsModal } from '../proactive-care/care-settings-modal';
+import { SettingsScreen } from '../settings/settings-screen';
+import { UpdatePrompt } from '../update/update-prompt';
+import { useUpdateCheck } from '../update/use-update-check';
 import { BrandMark } from '../ui/brand-mark';
 import { AppIcon } from '../ui/icon';
 import { colors, radii, spacing, typefaces } from '../ui/theme';
@@ -142,6 +145,7 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
   const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
   const [showNewMessage, setShowNewMessage] = useState(false);
   const [showCareSettings, setShowCareSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showHealthOverview, setShowHealthOverview] = useState(false);
   // ===== 新增：健康看板 =====
   const [showDashboard, setShowDashboard] = useState(false);
@@ -163,6 +167,7 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
   );
   const healthProfileCards = useHealthProfileCards(api);
   const healthConnect = useHealthConnect(user.id, api);
+  const updateCheck = useUpdateCheck();
   const gadgetbridge = useGadgetbridge(api);
   const refreshHealthProfileCards = healthProfileCards.refresh;
   const getAttachmentImageSource = useCallback(
@@ -652,7 +657,11 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
       {/* ===== Health Connect 横幅（保留原有） ===== */}
       {!healthConnect.connected || healthConnect.error !== null ? (
         <Pressable
+          accessibilityLabel={
+            healthConnect.syncing ? '正在连接 Health Connect' : '去连接 Health Connect'
+          }
           accessibilityRole="button"
+          disabled={healthConnect.syncing || healthConnect.checking}
           onPress={() => {
             if (healthConnect.connected) setShowCareSettings(true);
             else void healthConnect.connect().catch(() => {
@@ -663,10 +672,17 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         >
           <Text style={styles.healthNoticeText}>
             {healthConnect.error ??
-              '连接 Health Connect 后，可以在对话中查看真实手环记录。'}
+              healthConnect.progress ??
+              (healthConnect.checking
+                ? '正在检查手环连接…'
+                : '连接 Health Connect 后，可以在对话中查看真实手环记录。')}
           </Text>
           <Text style={styles.healthNoticeAction}>
-            {healthConnect.connected ? '查看' : '去连接'}
+            {healthConnect.syncing
+              ? '连接中…'
+              : healthConnect.connected
+                ? '查看'
+                : '去连接'}
           </Text>
         </Pressable>
       ) : null}
@@ -1034,6 +1050,38 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         />
       </Modal>
 
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setShowSettings(false)}
+        presentationStyle="fullScreen"
+        visible={showSettings}
+      >
+        <SettingsScreen
+          onClose={() => setShowSettings(false)}
+          onLogout={() => {
+            setShowSettings(false);
+            void logout();
+          }}
+          onOpenAccount={() => {
+            setShowSettings(false);
+            setShowCareSettings(true);
+          }}
+          onOpenCare={() => {
+            setShowSettings(false);
+            setShowCareSettings(true);
+          }}
+          update={updateCheck}
+          username={user.username}
+        />
+      </Modal>
+
+      {updateCheck.release === null ? null : (
+        <UpdatePrompt
+          onDismiss={() => void updateCheck.dismiss()}
+          release={updateCheck.release}
+        />
+      )}
+
       {showCareSettings ? (
         <CareSettingsModal
           api={api}
@@ -1119,7 +1167,7 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         }}
         onOpenSettings={() => {
           setShowMenu(false);
-          setShowCareSettings(true);
+          setShowSettings(true);
         }}
         // ===== 新增：健康看板入口 =====
         onOpenDashboard={() => {

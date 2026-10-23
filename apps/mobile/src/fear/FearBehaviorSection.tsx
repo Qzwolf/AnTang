@@ -70,6 +70,9 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // 念头默认收起：摊开「低血糖会死」这类原话对刚从低血糖里缓过来的人是加码，
+  // 想看的自己点开，不想看的不用被一次全灌进来。
+  const [showBeliefs, setShowBeliefs] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -126,7 +129,9 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
 
   return (
     <View style={styles.card}>
-      <Text style={styles.kicker}>行为记录</Text>
+      <View style={styles.kickerPill}>
+        <Text style={styles.kicker}>行为记录</Text>
+      </View>
       <Text style={styles.title}>你最近在做什么</Text>
 
       {loading ? (
@@ -143,45 +148,44 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
       ) : (
         <View>
           <Text style={styles.description}>
-            最近 {windowDays(summary)} 天，聊天里提到这些：
+            {mentionSentence(summary)}这些是聊天里顺口提到的，不是量表，也不打分。
           </Text>
 
-          {BEHAVIOR_ORDER.filter(
-            (kind) => (summary.behaviorCounts[kind] ?? 0) > 0,
-          ).map((kind) => (
-            <View key={kind} style={styles.row}>
-              <Text style={styles.rowLabel}>{behaviorLabel(kind)}</Text>
-              <Text style={styles.rowValue}>
-                {summary.behaviorCounts[kind]} 次
-              </Text>
-            </View>
-          ))}
-
-          {summary.monitoringWeekly > 0 ? (
-            <Text style={styles.metaText}>
-              反复确认血糖平均每周 {formatRate(summary.monitoringWeekly)} 次。
-            </Text>
-          ) : null}
-
-          {summary.avoidanceWeekly > 0 ? (
-            <Text style={styles.metaText}>
-              因担心而回避运动或自行减药，平均每周{' '}
-              {formatRate(summary.avoidanceWeekly)} 次。
-            </Text>
-          ) : null}
+          {/* 行为改成可换行的小标签：原来是「标签 ─ 次数」两列，次数撤掉后
+              右侧会空出一大块，看着像排版坏了。 */}
+          <View style={styles.chips}>
+            {BEHAVIOR_ORDER.filter(
+              (kind) => (summary.behaviorCounts[kind] ?? 0) > 0,
+            ).map((kind) => (
+              <View key={kind} style={styles.chip}>
+                <View style={styles.rowDot} />
+                <Text style={styles.rowLabel}>{behaviorLabel(kind)}</Text>
+              </View>
+            ))}
+          </View>
 
           {summary.beliefs.length > 0 ? (
             <View style={styles.beliefBlock}>
-              <Text style={styles.subtitle}>反复出现的念头</Text>
-              {summary.beliefs.map((belief) => (
-                <BeliefRow belief={belief} key={belief.beliefCode} />
-              ))}
+              <Pressable
+                accessibilityLabel={
+                  showBeliefs ? '收起反复出现的念头' : '展开反复出现的念头'
+                }
+                accessibilityRole="button"
+                onPress={() => setShowBeliefs((current) => !current)}
+                style={styles.sectionHead}
+              >
+                <View style={[styles.sectionBar, styles.sectionBarBelief]} />
+                <Text style={styles.subtitle}>反复出现的念头</Text>
+                <Text style={styles.sectionAction}>
+                  {showBeliefs ? '收起' : '展开'}
+                </Text>
+              </Pressable>
+              {showBeliefs
+                ? summary.beliefs.map((belief) => (
+                    <BeliefRow belief={belief} key={belief.beliefCode} />
+                  ))
+                : null}
             </View>
-          ) : null}
-
-          {summary.discrepancy !== 'unknown' &&
-          summary.discrepancyNote.length > 0 ? (
-            <Text style={styles.noteText}>{summary.discrepancyNote}</Text>
           ) : null}
         </View>
       )}
@@ -192,12 +196,16 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
 
       {logs.length > 0 || events.length > 0 ? (
         <View style={styles.recordsBlock}>
-          <Text style={styles.subtitle}>可以删掉的记录</Text>
+          <View style={styles.sectionHead}>
+            <View style={[styles.sectionBar, styles.sectionBarRecords]} />
+            <Text style={styles.subtitle}>记录</Text>
+          </View>
           <Text style={styles.description}>
             每一条都是聊天里你自己说的。删掉就真的没了，所以先确认一次。
           </Text>
           {logs.map((log) => (
             <RecordRow
+              accent="behavior"
               body={log.note}
               deleting={deleting}
               key={log.id}
@@ -213,6 +221,7 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
           ))}
           {events.map((event) => (
             <RecordRow
+              accent="belief"
               body={`「${event.quote}」`}
               deleting={deleting}
               key={event.id}
@@ -235,6 +244,7 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
 }
 
 type RecordRowProps = {
+  accent: 'behavior' | 'belief';
   label: string;
   body: string | null;
   when: string;
@@ -246,6 +256,7 @@ type RecordRowProps = {
 };
 
 function RecordRow({
+  accent,
   label,
   body,
   when,
@@ -256,7 +267,12 @@ function RecordRow({
   onConfirm,
 }: RecordRowProps) {
   return (
-    <View style={styles.recordRow}>
+    <View
+      style={[
+        styles.recordRow,
+        accent === 'behavior' ? styles.recordRowBehavior : styles.recordRowBelief,
+      ]}
+    >
       <View style={styles.beliefHead}>
         <Text style={styles.rowLabel}>{label}</Text>
         <Text style={styles.rowTag}>{when}</Text>
@@ -328,8 +344,20 @@ function windowDays(summary: FearSummary): number {
   return Math.round((end - start) / (24 * 60 * 60 * 1000));
 }
 
-function formatRate(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+/**
+ * 用一句话说明「最近提到过什么」，但不报次数。
+ *
+ * 大号「5 次」读起来像审计：本来只是记录，患者会当成「我又多测了」的证据。
+ * 所以这里只说有哪几类事，次数留在医生视图和原始记录里。
+ */
+function mentionSentence(summary: FearSummary): string {
+  const kinds = BEHAVIOR_ORDER.filter(
+    (kind) => (summary.behaviorCounts[kind] ?? 0) > 0,
+  ).map(behaviorLabel);
+  if (kinds.length === 0) {
+    return `最近 ${windowDays(summary)} 天，你在聊天里提到过一些和担心低血糖有关的事。`;
+  }
+  return `最近 ${windowDays(summary)} 天，你在聊天里提到过${kinds.join('、')}。`;
 }
 
 function formatWhen(value: string): string {
@@ -356,12 +384,19 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     padding: spacing.md,
   },
+  kickerPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radii.pill,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 3,
+  },
   kicker: {
-    color: colors.muted,
+    color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
-    fontSize: 12,
-    letterSpacing: 1,
-    marginBottom: spacing.xxs,
+    fontSize: 11,
+    letterSpacing: 0.8,
   },
   title: {
     color: colors.ink,
@@ -369,12 +404,24 @@ const styles = StyleSheet.create({
     fontSize: 18,
     marginBottom: spacing.xs,
   },
+  sectionHead: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+    marginTop: spacing.md,
+  },
+  sectionBar: {
+    borderRadius: radii.pill,
+    height: 14,
+    width: 3,
+  },
+  sectionBarBelief: { backgroundColor: '#E0A43C' },
+  sectionBarRecords: { backgroundColor: colors.primary },
   subtitle: {
     color: colors.ink,
     fontFamily: typefaces.sansMedium,
     fontSize: 14,
-    marginBottom: spacing.xs,
-    marginTop: spacing.sm,
   },
   description: {
     color: colors.muted,
@@ -399,13 +446,26 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
-  row: {
-    alignItems: 'center',
-    borderBottomColor: colors.line,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+  chips: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.xxs,
+  },
+  chip: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: radii.sm,
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
+  },
+  rowDot: {
+    backgroundColor: colors.primary,
+    borderRadius: radii.pill,
+    height: 6,
+    width: 6,
   },
   rowLabel: {
     color: colors.ink,
@@ -413,38 +473,50 @@ const styles = StyleSheet.create({
     fontFamily: typefaces.sans,
     fontSize: 15,
   },
-  rowValue: {
-    color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 15,
+  sectionAction: {
+    color: colors.muted,
+    fontFamily: typefaces.sans,
+    fontSize: 12,
   },
   rowTag: {
     color: colors.muted,
     fontFamily: typefaces.sans,
     fontSize: 12,
   },
-  metaText: {
-    color: colors.muted,
-    fontFamily: typefaces.sans,
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: spacing.xs,
-  },
   beliefBlock: {
-    marginTop: spacing.xs,
+    backgroundColor: '#FBF4E8',
+    borderRadius: radii.md,
+    marginTop: spacing.sm,
+    padding: spacing.sm,
   },
   recordsBlock: {
-    marginTop: spacing.xs,
+    borderTopColor: colors.line,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: spacing.sm,
   },
   beliefRow: {
-    borderBottomColor: colors.line,
+    borderBottomColor: 'rgba(224, 164, 60, 0.24)',
     borderBottomWidth: StyleSheet.hairlineWidth,
     paddingVertical: spacing.xs,
   },
   recordRow: {
-    borderBottomColor: colors.line,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
+  },
+  recordRowBehavior: {
+    backgroundColor: colors.paper,
+    borderColor: '#CBEAE2',
+    borderLeftColor: colors.primary,
+    borderLeftWidth: 3,
+  },
+  recordRowBelief: {
+    backgroundColor: '#FBF4E8',
+    borderColor: '#F0DCBC',
+    borderLeftColor: '#E0A43C',
+    borderLeftWidth: 3,
   },
   beliefHead: {
     alignItems: 'center',

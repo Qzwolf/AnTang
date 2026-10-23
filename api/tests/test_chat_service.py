@@ -1339,6 +1339,41 @@ async def test_stream_chat_run_opens_the_hypo_review_once(
     assert reviewed.reviewed_at is not None
 
 
+async def test_stream_chat_run_sees_the_glucose_the_patient_wrote_down(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """患者自己记的读数要进本轮提示词，否则模型只能从文字里猜血糖。"""
+
+    user = await create_user(db_session, "glucose_in_prompt")
+    await _low_reading(db_session, user.id, source="manual")
+    prepared_run = await prepare_chat_run(db_session, user.id, uuid4(), "今天有点飘")
+    monkeypatch.setattr(
+        chat,
+        "prepare_chat_context",
+        AsyncMock(return_value=prepared_context()),
+    )
+    fake_agent = FakeAgent([message_event("在的。"), values_event("在的。")])
+
+    events = [
+        event
+        async for event in stream_chat_run(
+            session=db_session,
+            model=cast("BaseChatModel", object()),
+            agent=cast("CoreAgentGraph", fake_agent),
+            tools=(),
+            companion_memory=DISABLED_COMPANION_MEMORY,
+            user_id=user.id,
+            prepared_run=prepared_run,
+        )
+    ]
+
+    assert events[-1].type == "message_completed"
+    prompt = rendered_prompt(fake_agent)
+    assert "[血糖记录：患者自己记的" in prompt
+    assert "不是连续监测" in prompt
+
+
 async def test_stream_chat_run_does_not_ask_about_a_reviewed_reading(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

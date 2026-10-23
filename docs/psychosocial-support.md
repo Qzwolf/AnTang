@@ -42,8 +42,11 @@ Gold score 缺失时不猜，落到 `unknown_awareness`，用默认接触频率�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/v1/health-profile/psychosocial-instrument` | 返回当前题库：说明、选项、题干、Gold 题 |
-| `GET` | `/api/v1/health-profile/psychosocial-assessment` | 返回最新一次档位；没有则返回 `null` |
+| `GET` | `/api/v1/health-profile/psychosocial-assessment` | 患者端读自己最新一次档位；没有则返回 `null` |
 | `POST` | `/api/v1/health-profile/psychosocial-assessment` | 写入一次评估，返回算出来的档位 |
+| `GET` | `/api/v1/patients/{patient_id}/psychosocial-assessment` | **医护端**读分数，需要患者授权；没有则返回 `null` |
+
+**患者端拿不到分数，分数只给医生。** 患者端响应只有 `assessed_at`、`instrument`、`weekly_contact_limit`；两个分量表、综合分、意识水平和象限只出现在医护端接口（`api/src/antang_api/psychosocial/report.py` 里的 `clinician_assessment_response`）。理由很简单：回避分量表是我们自己写的六道题，把「你的回避倾向 78 分」天天摆在患者面前，等于替他下一个没有依据的诊断；而「这周我们会联系你几次」是行为结果，患者需要知道才能理解 App 的行为。
 
 **题目由服务端下发**（`api/src/antang_api/psychosocial/instrument.py`）。以前题面写死在 App 里，换个题库就要重新打包、每个患者重装一次；授权到位那天要换的正是题目与计分，所以题面必须走接口。App 每次打开这一页拉一次，拿到的 `id` 原样回传；选项最大值也来自服务端，百分比按它折算，不在客户端写死「4」。
 
@@ -59,7 +62,12 @@ Gold score 缺失时不猜，落到 `unknown_awareness`，用默认接触频率�
 
 `extra="forbid"`，多传一个字段就是 422——**不接收诊断、不接收自由文本**。
 
-响应只给档位（`fear_percent`、`fear_high`、`awareness`、`quadrant`、`weekly_contact_limit`），**不返回量表原始分项**，避免 App 把它做成一个「恐惧指数排行榜」。
+响应分两种（同一个写入结果，两个视角）：
+
+- **患者端**（`PsychosocialProfileResponse`）只有 `assessed_at`、`instrument`、`weekly_contact_limit`。
+- **医护端**（`ClinicianPsychosocialResponse`，走 `/patients/{id}/psychosocial-assessment`）才有 `fear_behavior_percent`、`fear_worry_percent`、`fear_percent`、`fear_high`、`gold_score`、`awareness`、`quadrant`、`weekly_contact_limit`。
+
+两者都不返回量表原始题面与逐题答案，避免被做成「恐惧指数排行榜」或反推出量表内容。
 
 ## 五、刻意不做的事
 

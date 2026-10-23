@@ -34,3 +34,19 @@ jest.mock('expo-audio', () => ({
 jest.mock('expo-intent-launcher', () => ({
   startActivityAsync: jest.fn(async () => undefined),
 }));
+
+// 安全存储没有原生实现，用一份内存实现替身；测试可以用 __resetSecureStore()
+// 在两个用例之间把键值清干净。
+jest.mock('expo-secure-store', () => {
+  const values = new Map<string, string>();
+  return {
+    __resetSecureStore: () => values.clear(),
+    getItemAsync: jest.fn(async (key: string) => values.get(key) ?? null),
+    setItemAsync: jest.fn(async (key: string, value: string) => {
+      values.set(key, value);
+    }),
+    deleteItemAsync: jest.fn(async (key: string) => {
+      values.delete(key);
+    }),
+  };
+});

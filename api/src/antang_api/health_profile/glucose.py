@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -87,12 +88,27 @@ async def revoke_glucose_reading(
     return reading
 
 
+class GlucoseSummary(TypedDict):
+    """窗口统计的固定结构。
+
+    模型段子和血糖工具都读它，写成 TypedDict 是为了让类型检查能发现
+    「summary 里没有这个键」这类错误，而不是运行时 KeyError。
+    """
+
+    days: int
+    count: int
+    average_mg_dl: float | None
+    minimum_mg_dl: int | None
+    maximum_mg_dl: int | None
+    below_70_count: int
+
+
 async def summarize_glucose(
     session: AsyncSession,
     *,
     user_id: UUID,
     days: int = 7,
-) -> dict[str, object]:
+) -> GlucoseSummary:
     """窗口内的读数统计。低于 70 mg/dL 的条数单独给出，供界面展示。"""
 
     since = datetime.now(UTC) - timedelta(days=days)
@@ -113,12 +129,17 @@ async def summarize_glucose(
     ).one()
 
     count = int(row[0] or 0)
+    average: float | None = (
+        round(float(row[1]), 1) if row[1] is not None else None
+    )
+    minimum: int | None = int(row[2]) if row[2] is not None else None
+    maximum: int | None = int(row[3]) if row[3] is not None else None
     return {
         "days": days,
         "count": count,
-        "average_mg_dl": round(float(row[1]), 1) if row[1] is not None else None,
-        "minimum_mg_dl": int(row[2]) if row[2] is not None else None,
-        "maximum_mg_dl": int(row[3]) if row[3] is not None else None,
+        "average_mg_dl": average,
+        "minimum_mg_dl": minimum,
+        "maximum_mg_dl": maximum,
         "below_70_count": int(row[4] or 0),
     }
 
@@ -159,3 +180,70 @@ async def mark_hypo_reviewed(
 
     reading.reviewed_at = now
     await session.commit()
+
+
+GLUCOSE_CONTEXT_DAYS = 7
+GLUCOSE_LOW_MG_DL = 70
+
+GLUCOSE_CONTEXT_LABELS: dict[str, str] = {
+    "fasting": "空腹",
+    "pre_meal": "餐前",
+    "post_meal": "餐后",
+    "bedtime": "睡前",
+    "night": "夜间",
+    "other": "随时",
+}
+
+
+def to_mmol(value_mg_dl: int) -> str:
+    """国内患者说的是 mmol/L；库里存 mg/dL，只在这里换算一次。"""
+
+    return f"{value_mg_dl / 18:.1f}"
+
+
+def render_glucose_context(
+    *,
+    days: int,
+    summary: GlucoseSummary,
+    recent: list[GlucoseReading],
+) -> str:
+    """把患者自己记的血糖摊成模型能读的一段。
+
+    只陈述数字与情境，不给判断：模型据此接话，判读留给对话本身。
+    """
+
+    count = summary["count"]
+    if count == 0:
+        return ""
+
+    lines = [f"[血糖记录：患者自己记的，近 {days} 天 {count} 次]"]
+    average = summary["average_mg_dl"]
+    parts = []
+    if average is not None:
+        parts.append(f"平均 {to_mmol(round(average))}")
+    minimum = summary["minimum_mg_dl"]
+    if minimum is not None:
+        parts.append(f"最低 {to_mmol(minimum)}")
+    maximum = summary["maximum_mg_dl"]
+    if maximum is not None:
+        parts.append(f"最高 {to_mmol(maximum)}")
+    low_count = summary["below_70_count"]
+    if low_count > 0:
+        parts.append(f"低于 3.9 的 {low_count} 次")
+    if parts:
+        lines.append("，".join(parts) + " mmol/L。")
+
+    if recent:
+        lines.append("最近几次（时间 | 数值 | 情境）：")
+        for reading in recent:
+            label = GLUCOSE_CONTEXT_LABELS.get(reading.context, reading.context)
+            lines.append(
+                f"- {reading.measured_at:%m-%d %H:%M} | "
+                f"{to_mmol(reading.value_mg_dl)} | {label}"
+            )
+
+    lines.append(
+        "这些是患者自己记的，可能漏记，不是连续监测；不要拿一两次的波动说他"
+        "「失控」，也不要替他判读高低。"
+    )
+    return "\n".join(lines)

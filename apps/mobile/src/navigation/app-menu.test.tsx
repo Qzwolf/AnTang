@@ -51,6 +51,10 @@ describe('AppMenu', () => {
     expect(onOpenHealth).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onSelectConversation).toHaveBeenCalledWith('message-1');
+
+    // 「检查更新」搬进设置页了，侧边栏不再挂这一行。
+    expect(tree!.root.findAllByProps({ accessibilityLabel: '检查更新' })).toHaveLength(0);
+
     act(() => tree!.unmount());
   });
 });

@@ -1,17 +1,14 @@
 import {
   ArrowRight01Icon,
+  BloodIcon,
   FolderHeartIcon,
   Message01Icon,
   Settings04Icon,
   SmartWatch01Icon,  // 新增：手环图标
   ChartLineData01Icon,  // 新增：看板图标
 } from '@hugeicons/core-free-icons';
-import { useState } from 'react';
 import {
-  Alert,
-  Linking,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -22,13 +19,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppIcon } from '../ui/icon';
 import { colors, radii, spacing, typefaces } from '../ui/theme';
-import { downloadAndInstall } from '../update/install';
-import {
-  checkForUpdate,
-  formatSize,
-  installedVersion,
-  type ReleaseInfo,
-} from '../update/release';
 
 export type ConversationAnchor = {
   group: string;
@@ -66,96 +56,6 @@ function formatLastSync(value: string): string {
   }).format(new Date(value));
 }
 
-function UpdateRow() {
-  const [phase, setPhase] = useState<'idle' | 'checking' | 'installing'>('idle');
-  const [percent, setPercent] = useState(0);
-  const installed = installedVersion();
-  const busy = phase !== 'idle';
-
-  async function startInstall(release: ReleaseInfo) {
-    setPercent(0);
-    setPhase('installing');
-    try {
-      await downloadAndInstall(release, (progress) =>
-        setPercent(progress.percent),
-      );
-    } catch (error) {
-      Alert.alert(
-        '没能开始安装',
-        error instanceof Error ? error.message : '再试一次。',
-      );
-    } finally {
-      setPhase('idle');
-    }
-  }
-
-  async function handlePress() {
-    if (busy) {
-      return;
-    }
-    setPhase('checking');
-    try {
-      const result = await checkForUpdate();
-      if (result.kind === 'available') {
-        const { release } = result;
-        const actions = [
-          { text: '稍后', style: 'cancel' as const },
-          {
-            text: '去下载',
-            onPress: () => {
-              void Linking.openURL(release.apkUrl);
-            },
-          },
-        ];
-        if (Platform.OS === 'android') {
-          actions.push({
-            text: '直接安装',
-            onPress: () => {
-              void startInstall(release);
-            },
-          });
-        }
-        Alert.alert(
-          '有新版本',
-          `新版本 ${release.versionName}（${formatSize(release.sizeBytes)}）\n\n${release.notes}`,
-          actions,
-        );
-      } else {
-        Alert.alert('已是最新版本', `当前版本 ${result.installed.name}`);
-      }
-    } catch (error) {
-      Alert.alert(
-        '检查更新失败',
-        error instanceof Error ? error.message : '请确认网络后重试',
-      );
-    } finally {
-      setPhase('idle');
-    }
-  }
-
-  const action =
-    phase === 'checking'
-      ? '检查中…'
-      : phase === 'installing'
-        ? `下载 ${percent}%`
-        : '检查';
-
-  return (
-    <Pressable
-      accessibilityLabel="检查更新"
-      accessibilityRole="button"
-      disabled={busy}
-      onPress={handlePress}
-      style={styles.updateRow}
-    >
-      <View style={styles.updateCopy}>
-        <Text style={styles.updateTitle}>检查更新</Text>
-        <Text style={styles.updateHint}>当前版本 {installed.name}</Text>
-      </View>
-      <Text style={styles.updateAction}>{action}</Text>
-    </Pressable>
-  );
-}
 
 export function AppMenu({
   conversations,
@@ -290,8 +190,8 @@ export function AppMenu({
               pressed && styles.healthEntryPressed,
             ]}
           >
-            <View style={styles.healthIcon}>
-              <AppIcon color={colors.primaryPressed} icon={ChartLineData01Icon} size={26} />
+            <View style={[styles.healthIcon, styles.glucoseIcon]}>
+              <AppIcon color="#B25F2A" icon={BloodIcon} size={26} />
             </View>
             <View style={styles.healthCopy}>
               <Text style={styles.healthTitle}>血糖记录</Text>
@@ -342,7 +242,6 @@ export function AppMenu({
             </Text>
           </Pressable>
 
-          <UpdateRow />
 
           <View style={styles.sectionHeading}>
             <AppIcon color={colors.muted} icon={Message01Icon} size={19} />
@@ -373,8 +272,10 @@ export function AppMenu({
                         pressed && styles.conversationPressed,
                       ]}
                     >
-                      <Text style={styles.conversationTime}>{conversation.time}</Text>
-                      <Text numberOfLines={1} style={styles.conversationPreview}>
+                      <Text style={styles.conversationTime}>
+                        {conversation.time}
+                      </Text>
+                      <Text numberOfLines={2} style={styles.conversationPreview}>
                         {conversation.preview}
                       </Text>
                     </Pressable>
@@ -390,34 +291,6 @@ export function AppMenu({
 }
 
 const styles = StyleSheet.create({
-  updateRow: {
-    alignItems: 'center',
-    backgroundColor: colors.paperMuted,
-    borderRadius: radii.md,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  updateCopy: { flex: 1, gap: 2 },
-  updateTitle: {
-    color: colors.text,
-    fontFamily: typefaces.sans,
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  updateHint: {
-    color: colors.muted,
-    fontFamily: typefaces.sans,
-    fontSize: 12,
-  },
-  updateAction: {
-    color: colors.primaryPressed,
-    fontFamily: typefaces.sans,
-    fontSize: 14,
-    fontWeight: '600',
-  },
   overlay: {
     flex: 1,
     flexDirection: 'row',
@@ -495,6 +368,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     backgroundColor: colors.paper,
   },
+  glucoseIcon: { backgroundColor: '#FBEEE2' },
   healthCopy: { flex: 1, gap: 3 },
   healthTitle: {
     color: colors.ink,
@@ -602,32 +476,38 @@ const styles = StyleSheet.create({
   },
   groupTitle: {
     paddingHorizontal: spacing.xs,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
-    color: colors.faint,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxs,
+    color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
     fontSize: 12,
+    letterSpacing: 0.4,
   },
   conversation: {
-    minHeight: 46,
+    alignItems: 'flex-start',
+    backgroundColor: colors.paper,
+    borderRadius: radii.sm,
     flexDirection: 'row',
-    alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.xs,
-    borderRadius: radii.md,
+    marginBottom: 6,
+    minHeight: 58,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   conversationPressed: { backgroundColor: colors.paperMuted },
   conversationTime: {
-    width: 42,
     color: colors.faint,
     fontFamily: typefaces.sans,
-    fontSize: 12,
+    fontSize: 11,
     fontVariant: ['tabular-nums'],
+    lineHeight: 20,
+    width: 40,
   },
   conversationPreview: {
-    flex: 1,
     color: colors.text,
+    flex: 1,
     fontFamily: typefaces.sans,
     fontSize: 14,
+    lineHeight: 20,
   },
 });

@@ -12,6 +12,10 @@ export type ReleaseInfo = {
   sha256: string;
   sizeBytes: number;
   notes: string;
+  /** 这个包是用哪个源码提交打的；旧清单没有这一栏时为 null。 */
+  builtFromCommit: string | null;
+  /** 这版打开了哪些功能开关，供排查「这包怎么没有某个功能」。 */
+  features: string[];
 };
 
 export type InstalledVersion = {
@@ -59,6 +63,13 @@ export function parseRelease(payload: unknown): ReleaseInfo {
     sha256: readString(source, 'sha256'),
     sizeBytes: readNumber(source, 'size_bytes'),
     notes: typeof source.notes === 'string' ? source.notes : '',
+    builtFromCommit:
+      typeof source.built_from_commit === 'string' && source.built_from_commit.length > 0
+        ? source.built_from_commit
+        : null,
+    features: Array.isArray(source.features)
+      ? source.features.filter((item): item is string => typeof item === 'string')
+      : [],
   };
   if (!/^https?:\/\//.test(release.apkUrl)) {
     throw new Error('版本清单里的下载地址不是 http(s) 地址');

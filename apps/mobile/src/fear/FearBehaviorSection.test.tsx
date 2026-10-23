@@ -110,18 +110,19 @@ async function render(
 }
 
 describe('FearBehaviorSection', () => {
-  it('展示聊天里记下的行为次数与每周频率', async () => {
+  it('说出最近提到过什么，但不报次数', async () => {
     const tree = await render(buildApi(summary()));
     const text = treeText(tree);
     expect(text).toContain('最近 28 天');
     expect(text).toContain('额外查血糖');
-    expect(text).toContain('6 次');
     expect(text).toContain('回避运动');
-    expect(text).toContain('反复确认血糖平均每周 1.5 次');
-    expect(text).toContain('因担心而回避运动或自行减药，平均每周 0.5 次');
+    // 大号计数会被读成审计，所以只在没被要求的细节里保留
+    expect(text).not.toContain('6 次');
+    expect(text).not.toContain('平均每周 1.5 次');
+    expect(text).toContain('不是量表，也不打分');
   });
 
-  it('展示反复出现的信念原话，并且不出现分数', async () => {
+  it('念头默认收起，点开才看到原话与次数', async () => {
     const tree = await render(
       buildApi(
         summary({
@@ -140,6 +141,12 @@ describe('FearBehaviorSection', () => {
         }),
       ),
     );
+    expect(treeText(tree)).not.toContain('总怕半夜低血糖昏过去没人知道');
+
+    await act(async () => {
+      findByLabel(tree, '展开反复出现的念头').props.onPress();
+    });
+
     const text = treeText(tree);
     expect(text).toContain('低血糖会让我昏迷');
     expect(text).toContain('提到 3 次');
@@ -181,7 +188,7 @@ describe('FearBehaviorSection', () => {
       }),
     );
     const text = treeText(tree);
-    expect(text).toContain('可以删掉的记录');
+    expect(text).toContain('记录');
     expect(text).toContain('夜间反复确认血糖');
     expect(text).toContain('低血糖会让我昏迷');
     expect(text).toContain('总怕半夜低血糖昏过去没人知道');

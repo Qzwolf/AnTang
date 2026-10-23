@@ -54,12 +54,12 @@ from antang_api.health_profile.wearable_service import (
 from antang_api.proactive_care.service import record_health_import
 from antang_api.psychosocial import (
     Instrument,
-    PsychosocialProfile,
     current_instrument,
     read_latest_assessment_row,
     record_assessment,
     score_answers,
 )
+from antang_api.psychosocial.report import patient_assessment_response
 from antang_api.models import (
     HYPOGLYCEMIA_BELIEFS,
     HealthProfileChange,
@@ -480,21 +480,8 @@ async def get_psychosocial_instrument(
 
 
 def _psychosocial_response(row: PsychosocialAssessment) -> PsychosocialProfileResponse:
-    profile = PsychosocialProfile(
-        fear_behavior_percent=row.fear_behavior_percent,
-        fear_worry_percent=row.fear_worry_percent,
-        gold_score=row.gold_score,
-    )
-    return PsychosocialProfileResponse(
-        assessed_at=row.assessed_at,
-        instrument=row.instrument,
-        fear_percent=profile.fear_percent,
-        fear_high=profile.fear_high,
-        gold_score=profile.gold_score,
-        awareness=profile.awareness,
-        quadrant=profile.quadrant,
-        weekly_contact_limit=profile.weekly_contact_limit,
-    )
+    # 患者端只回行为结果（每周几次）；分数与象限走医护端，见 psychosocial/report.py。
+    return patient_assessment_response(row)
 
 
 @router.get(

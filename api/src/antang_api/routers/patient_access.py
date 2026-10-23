@@ -15,9 +15,12 @@ from antang_api.patient_access import (
     get_clinician_user,
     get_patient_user,
 )
+from antang_api.psychosocial import read_latest_assessment_row
+from antang_api.psychosocial.report import clinician_assessment_response
 from antang_api.routers.health_profile import read_health_profile
 from antang_api.schemas.auth import UserResponse
 from antang_api.schemas.health_profile import (
+    ClinicianPsychosocialResponse,
     HealthProfileResponse,
     WearableDashboardResponse,
 )
@@ -199,6 +202,30 @@ async def patient_profile(
     result = await read_health_profile(session, patient_id)
     await session.commit()
     return result
+
+
+@router.get(
+    "/patients/{patient_id}/psychosocial-assessment",
+    response_model=ClinicianPsychosocialResponse | None,
+)
+async def patient_assessment(
+    patient_id: UUID, user: Clinician, session: Database, response: Response
+) -> ClinicianPsychosocialResponse | None:
+    """医护端读量表结果：分数、两个分量表、意识水平与象限。
+
+    患者端拿不到这些数字（`/health-profile/psychosocial-assessment` 只回
+    每周联系次数），所以这里必须走授权校验：没有明确授权的医护拿不到。
+    """
+
+    response.headers["Cache-Control"] = "no-store"
+    await check_patient_access(
+        session, clinician=user, patient_id=patient_id, resource="health_profile"
+    )
+    row = await read_latest_assessment_row(session, patient_id)
+    await session.commit()
+    if row is None:
+        return None
+    return clinician_assessment_response(row)
 
 
 @router.get(
