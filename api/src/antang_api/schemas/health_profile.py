@@ -601,10 +601,25 @@ class PsychosocialInstrumentResponse(BaseModel):
 
 
 class PsychosocialProfileResponse(BaseModel):
-    """服务器给 App 看的档位；不返回量表原始题目与逐题答案。"""
+    """服务器给 App 看的档位；不返回量表原始题目、逐题答案，也不返回分数。
+
+    刻意不返回任何分数：回避分量表是我们自己写的六道题，把「你的回避倾向
+    78 分」摆在患者面前，等于每天替医生下一个诊断，而这个分数撑不起那个
+    分量。分数、意识水平与象限只走医护端（ClinicianPsychosocialResponse）。
+    """
 
     assessed_at: datetime
     instrument: str
+    weekly_contact_limit: int
+
+
+class ClinicianPsychosocialResponse(BaseModel):
+    """医护端的心理健康档位：两个分量表、综合分、意识水平与象限都在这里。"""
+
+    assessed_at: datetime
+    instrument: str
+    fear_behavior_percent: int
+    fear_worry_percent: int
     fear_percent: int
     fear_high: bool
     gold_score: int | None

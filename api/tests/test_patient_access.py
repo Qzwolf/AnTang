@@ -234,6 +234,42 @@ async def test_role_change_and_disabled_accounts_take_effect_on_existing_session
     assert (await client.get(root, headers=ch)).status_code == 401
 
 
+async def test_only_the_authorized_clinician_sees_the_scale_scores(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """回避分只给医生：患者自己提交后拿不到分数，授权医护才看得到。"""
+
+    patient, ph = await account(client, db_session)
+    clinician, ch = await account(client, db_session, UserRole.CLINICIAN)
+    stranger, sh = await account(client, db_session, UserRole.CLINICIAN)
+    root = f"/api/v1/patients/{patient['id']}/psychosocial-assessment"
+    assert (await grant(client, ph, clinician["id"])).status_code == 201
+
+    recorded = await client.post(
+        "/api/v1/health-profile/psychosocial-assessment",
+        headers=ph,
+        json={
+            "fear_behavior_percent": 40,
+            "fear_worry_percent": 60,
+            "gold_score": 5,
+            "assessed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    assert recorded.status_code == 201
+    assert "fear_percent" not in recorded.json()
+    assert "quadrant" not in recorded.json()
+
+    body = (await client.get(root, headers=ch)).json()
+    assert body["fear_behavior_percent"] == 40
+    assert body["fear_worry_percent"] == 60
+    assert body["fear_percent"] == 50
+    assert body["quadrant"] == "high_fear_impaired_awareness"
+    assert body["weekly_contact_limit"] == 4
+
+    assert (await client.get(root, headers=sh)).status_code == 403
+    assert (await client.get(root)).status_code == 401
+
+
 async def test_patient_list_paginates_only_authorized_patients(
     client: AsyncClient, db_session: AsyncSession
 ):

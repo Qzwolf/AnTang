@@ -66,11 +66,6 @@ function profile(overrides: Partial<PsychosocialProfile> = {}): PsychosocialProf
   return {
     assessedAt: '2026-10-31T09:00:00+08:00',
     instrument: 'antang-behavior-v1',
-    fearPercent: 75,
-    fearHigh: true,
-    goldScore: 5,
-    awareness: 'impaired',
-    quadrant: 'high_fear_impaired_awareness',
     weeklyContactLimit: 4,
     ...overrides,
   };

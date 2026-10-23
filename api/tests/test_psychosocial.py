@@ -179,10 +179,11 @@ async def test_assessment_round_trip(db_session: AsyncSession) -> None:
         )
         assert created.status_code == 201
         body = created.json()
-        assert body["fear_percent"] == 50
-        assert body["fear_high"] is True
-        assert body["awareness"] == "impaired"
-        assert body["quadrant"] == "high_fear_impaired_awareness"
+        # 患者端不返回任何分数：分数只走医护端（/patients/{id}/psychosocial-assessment）。
+        assert "fear_percent" not in body
+        assert "fear_high" not in body
+        assert "quadrant" not in body
+        assert "awareness" not in body
         assert body["weekly_contact_limit"] == 4
         assert datetime.fromisoformat(body["assessed_at"]) == assessed_at
 
@@ -191,7 +192,8 @@ async def test_assessment_round_trip(db_session: AsyncSession) -> None:
             headers=headers,
         )
         assert latest.status_code == 200
-        assert latest.json()["quadrant"] == "high_fear_impaired_awareness"
+        assert latest.json()["weekly_contact_limit"] == 4
+        assert "fear_percent" not in latest.json()
 
 
 async def test_the_server_scores_the_answers_it_asked_for(db_session: AsyncSession) -> None:
@@ -305,8 +307,8 @@ async def test_latest_assessment_wins_by_assessed_at(db_session: AsyncSession) -
             "/api/v1/health-profile/psychosocial-assessment",
             headers=headers,
         )
-        assert latest.json()["gold_score"] == 7
-        assert latest.json()["quadrant"] == "low_fear_impaired_awareness"
+        assert latest.json()["weekly_contact_limit"] == 5
+        assert "quadrant" not in latest.json()
 
 
 async def test_chat_reads_the_latest_assessment_of_that_user(

@@ -1668,14 +1668,15 @@ export type PsychosocialQuadrant =
 
 export type PsychosocialAwareness = 'normal' | 'impaired' | 'unknown';
 
+/**
+ * 患者端能看到的量表结果：只有「每周联系几次」。
+ *
+ * 分数、意识水平和象限只走医护端（`/patients/{id}/psychosocial-assessment`）：
+ * 回避分量表是自编六题，把百分比摊给患者看等于每天替他下一个诊断。
+ */
 export type PsychosocialProfile = {
   assessedAt: string;
   instrument: string;
-  fearPercent: number;
-  fearHigh: boolean;
-  goldScore: number | null;
-  awareness: PsychosocialAwareness;
-  quadrant: PsychosocialQuadrant;
   weeklyContactLimit: number;
 };
 
@@ -1782,52 +1783,18 @@ export function parsePsychosocialInstrument(
   };
 }
 
-const PSYCHOSOCIAL_QUADRANTS: readonly PsychosocialQuadrant[] = [
-  'high_fear_normal_awareness',
-  'high_fear_impaired_awareness',
-  'low_fear_normal_awareness',
-  'low_fear_impaired_awareness',
-  'unknown_awareness',
-];
-
-const PSYCHOSOCIAL_AWARENESS: readonly PsychosocialAwareness[] = [
-  'normal',
-  'impaired',
-  'unknown',
-];
-
 export function parsePsychosocialProfile(value: unknown): PsychosocialProfile | null {
   if (value === null) return null;
   const data = objectValue(value, 'psychosocial profile');
-  const instrument = stringValue(data.instrument, 'psychosocial profile.instrument');
-  const fearPercent = integerValue(data.fear_percent, 'psychosocial profile.fear_percent');
-  if (fearPercent < 0 || fearPercent > 100) {
-    throw new Error('psychosocial profile.fear_percent 超出 0-100');
-  }
-  const awareness = stringValue(data.awareness, 'psychosocial profile.awareness');
-  if (!PSYCHOSOCIAL_AWARENESS.includes(awareness as PsychosocialAwareness)) {
-    throw new Error('psychosocial profile.awareness 无效');
-  }
-  const quadrant = stringValue(data.quadrant, 'psychosocial profile.quadrant');
-  if (!PSYCHOSOCIAL_QUADRANTS.includes(quadrant as PsychosocialQuadrant)) {
-    throw new Error('psychosocial profile.quadrant 无效');
-  }
-  const goldScore = data.gold_score === null
-    ? null
-    : integerValue(data.gold_score, 'psychosocial profile.gold_score');
-  const weeklyContactLimit = integerValue(
-    data.weekly_contact_limit,
-    'psychosocial profile.weekly_contact_limit',
-  );
+  // 服务端不再给患者分数；这里也就不再解析 fear_percent / quadrant 之类的字段，
+  // 否则旧包遇到新后端会直接抛错。
   return {
     assessedAt: zonedDateTimeValue(data.assessed_at, 'psychosocial profile.assessed_at'),
-    instrument,
-    fearPercent,
-    fearHigh: booleanValue(data.fear_high, 'psychosocial profile.fear_high'),
-    goldScore,
-    awareness: awareness as PsychosocialAwareness,
-    quadrant: quadrant as PsychosocialQuadrant,
-    weeklyContactLimit,
+    instrument: stringValue(data.instrument, 'psychosocial profile.instrument'),
+    weeklyContactLimit: integerValue(
+      data.weekly_contact_limit,
+      'psychosocial profile.weekly_contact_limit',
+    ),
   };
 }
 
