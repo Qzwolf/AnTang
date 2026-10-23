@@ -36,7 +36,13 @@ from antang_api.citations import (
 from antang_api.companion_memory import CompanionMemory
 from antang_api.context import prepare_chat_context
 from antang_api.context.health_profile import render_core_profile
-from antang_api.health_profile.glucose import pending_hypo_review
+from antang_api.health_profile.glucose import (
+    GLUCOSE_CONTEXT_DAYS,
+    list_glucose_readings,
+    pending_hypo_review,
+    render_glucose_context,
+    summarize_glucose,
+)
 from antang_api.database import lock_user_conversation
 from antang_api.models import (
     AgentRun,
@@ -106,6 +112,7 @@ TOOL_ACTIVITY_PHASES: dict[str, ActivityPhase] = {
     "web_fetch": "reading",
     "read_wearable_data": "reading",
     "search_diabetes_knowledge": "reading",
+    "read_glucose_readings": "reading",
     "delegate_health_profile": "organizing",
     "manage_care_plan": "organizing",
     "log_fear_behavior": "organizing",
@@ -718,6 +725,22 @@ async def stream_chat_run(
             for part in (describe_today(datetime.now(UTC)), behavior_context)
             if part
         )
+        # 患者自己记的血糖：模型只能从文字里猜，所以把近 7 天的读数摊开给它，
+        # 并注明「自己记的、可能漏记」，免得被当成 CGM 曲线下判断。
+        glucose_context = render_glucose_context(
+            days=GLUCOSE_CONTEXT_DAYS,
+            summary=await summarize_glucose(
+                session,
+                user_id=user_id,
+                days=GLUCOSE_CONTEXT_DAYS,
+            ),
+            recent=await list_glucose_readings(
+                session,
+                user_id=user_id,
+                days=GLUCOSE_CONTEXT_DAYS,
+                limit=5,
+            ),
+        )
         # 复盘只问一次：读取最近 24 小时里偏低、还没问过的那一条。
         # prepare_chat_context 会 rollback，之后再碰 ORM 对象就会过期，
         # 所以这里立刻把开场白定下来，只留 reading.id。
@@ -821,6 +844,7 @@ async def stream_chat_run(
             live_heart_rate_context=live_heart_rate_context,
             psychosocial_context=psychosocial_context,
             behavior_context=behavior_context,
+            glucose_context=glucose_context,
             hypo_review_context=hypo_review_context,
             speech_cue_context=speech_cue_context,
         )

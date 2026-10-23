@@ -83,6 +83,7 @@ def render_core_system_prompt(
     live_heart_rate_context: str = "",
     psychosocial_context: str = "",
     behavior_context: str = "",
+    glucose_context: str = "",
     hypo_review_context: str = "",
     speech_cue_context: str = "",
 ) -> str:
@@ -110,6 +111,10 @@ def render_core_system_prompt(
         # 复盘的价值在时机：24 小时内问是复盘，过期再问就成了审问。
         # 这里给出的是本轮该做的动作，不是用户档案，不能原样念给用户。
         rendered_prompt = f"{rendered_prompt}\n\n{hypo_review_context}"
+    if glucose_context.strip():
+        # 患者自己记的读数：能回答「我最近飘不飘」这类问题，但会漏记，
+        # 所以带上来源与口径，避免被当成 CGM 曲线去下判断。
+        rendered_prompt = f"{rendered_prompt}\n\n{glucose_context}"
     if speech_cue_context.strip():
         # 声音状态只对紧接着的那一句有效，而且置信度低、可能被低血糖症状带偏。
         # 它改的是语气，不是内容；所以放在指令段的最后，避免被当成本轮任务。
