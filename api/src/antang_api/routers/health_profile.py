@@ -2,7 +2,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +24,16 @@ from antang_api.behavioral import (
     read_fear_summary,
 )
 from antang_api.database import get_session
+from antang_api.health_profile.cgm_import import CgmParseError, parse_cgm_csv
+from antang_api.health_profile.cgm_store import read_samples, store_import
+from antang_api.schemas.cgm import (
+    CgmImportPreviewResponse,
+    CgmImportResponse,
+    CgmSamplePreview,
+    CgmSampleResponse,
+    CgmSeriesResponse,
+    CgmSourceSystem,
+)
 from antang_api.health_profile.glucose import (
     list_glucose_readings,
     record_glucose_reading,
@@ -721,3 +739,116 @@ async def delete_hypoglycemia_belief_event(
             status_code=status.HTTP_404_NOT_FOUND, detail="没有这条记录"
         )
     await session.commit()
+
+
+MAX_CGM_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+def _decode_upload(upload: UploadFile, data: bytes) -> None:
+    if len(data) == 0:
+        raise HTTPException(status_code=422, detail="这个文件是空的")
+    if len(data) > MAX_CGM_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_CGM_UPLOAD_BYTES // (1024 * 1024)} MB，请先导出一个月内的数据",
+        )
+    name = (upload.filename or "").lower()
+    if not (name.endswith(".csv") or name.endswith(".txt")):
+        raise HTTPException(
+            status_code=415,
+            detail="目前只支持 CSV 导出文件；PDF 或截图请在「报告解读」里发送，由对话读取。",
+        )
+
+
+async def _read_upload(upload: UploadFile) -> bytes:
+    data = await upload.read()
+    _decode_upload(upload, data)
+    return data
+
+
+@router.post("/glucose-imports/preview", response_model=CgmImportPreviewResponse)
+async def preview_glucose_import(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+    source_system: Annotated[CgmSourceSystem, Query()] = "generic",
+) -> CgmImportPreviewResponse:
+    """先解析、不落库：把能用的行和可疑行都摆出来，让患者确认后再导入。"""
+
+    del user
+    data = await _read_upload(file)
+    try:
+        result = parse_cgm_csv(data)
+    except CgmParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return CgmImportPreviewResponse(
+        source_system=source_system,
+        file_name=file.filename or "upload.csv",
+        unit=result.unit,
+        total_rows=len(result.samples) + len(result.problems),
+        usable_rows=len(result.samples),
+        problems=result.problems[:20],
+        first_at=result.samples[0].recorded_at if result.samples else None,
+        last_at=result.samples[-1].recorded_at if result.samples else None,
+        samples=[
+            CgmSamplePreview(
+                recorded_at=sample.recorded_at,
+                value_mg_dl=sample.value_mg_dl,
+                trend=sample.trend,
+            )
+            for sample in result.samples[:10]
+        ],
+    )
+
+
+@router.post(
+    "/glucose-imports",
+    response_model=CgmImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_glucose_series(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    source_system: Annotated[CgmSourceSystem, Query()] = "generic",
+) -> CgmImportResponse:
+    """确认导入：整批写库，同一份文件重复导入不会重复入库。"""
+
+    data = await _read_upload(file)
+    try:
+        result = parse_cgm_csv(data)
+    except CgmParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not result.samples:
+        raise HTTPException(
+            status_code=422,
+            detail="这个文件里没有一行能用的血糖数据，请检查导出格式。",
+        )
+
+    record = await store_import(
+        session,
+        user_id=user.id,
+        source_system=source_system,
+        file_name=file.filename or "upload.csv",
+        samples=result.samples,
+        skipped_count=result.skipped_rows,
+    )
+    await session.commit()
+    return CgmImportResponse.model_validate(record)
+
+
+@router.get("/cgm-samples", response_model=CgmSeriesResponse)
+async def get_cgm_samples(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> CgmSeriesResponse:
+    """按时间正序返回导入的 CGM 序列，供曲线展示。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    samples = await read_samples(session, user_id=user.id, since=since)
+    return CgmSeriesResponse(
+        days=days,
+        count=len(samples),
+        samples=[CgmSampleResponse.model_validate(item) for item in samples],
+    )
