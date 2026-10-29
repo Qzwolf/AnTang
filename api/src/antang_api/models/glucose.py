@@ -28,7 +28,7 @@ GLUCOSE_CONTEXTS: tuple[str, ...] = (
 
 # manual = 患者自己填；report = 从 CGM 报告解析出来。两者混在同一张表里，
 # 但永远带着 source，免得拿解析结果去冒充手工测量。
-GLUCOSE_SOURCES: tuple[str, ...] = ("manual", "report")
+GLUCOSE_SOURCES: tuple[str, ...] = ("manual", "report", "public_dataset", "ohio_cgm")
 
 _CONTEXTS_SQL = ", ".join(f"'{value}'" for value in GLUCOSE_CONTEXTS)
 _SOURCES_SQL = ", ".join(f"'{value}'" for value in GLUCOSE_SOURCES)

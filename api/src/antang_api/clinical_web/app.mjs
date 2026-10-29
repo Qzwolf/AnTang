@@ -1,8 +1,8 @@
-import { glucoseValue, lineChart, stepsChart } from './chart.mjs';
+import { glucoseValue, lineChart, stepsChart, eventChart } from './chart.mjs?v=20261029-point5';
 
 const $ = id => document.getElementById(id);
 const state = { access: null, refresh: null, user: null, unlock: null, expiry: null, configured: false, scope: 'granted', patients: [], next: null, selected: null, overview: null, epoch: 0, request: null };
-const sourceNames = { manual: '手工记录', report: '报告数据' };
+const sourceNames = { manual: '手工记录', report: '报告数据', public_dataset: '公开数据集（历史记录）', ohio_cgm: 'OhioT1DM · CGM' };
 const contextNames = { fasting: '空腹', pre_meal: '餐前', post_meal: '餐后', bedtime: '睡前', night: '夜间', other: '其他' };
 const dateTime = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
 const text = (id, value) => { $(id).textContent = value; };
@@ -38,7 +38,7 @@ async function api(path, { body, method = 'GET', signal } = {}) {
 }
 
 function clearDetail() {
-  state.overview = null; show('demo-notice', false);
+  state.overview = null; show('demo-notice', false); show('public-notice', false); show('study-card', false); show('study-notice', false);
   show('clinical-content', false);
   $('glucose-chart').replaceChildren(); $('wearable-sources').replaceChildren();
   $('glucose-records').replaceChildren(); $('profile-fields').replaceChildren(); $('health-facts').replaceChildren();
@@ -80,7 +80,7 @@ function renderPatients() {
   const rows = state.patients.map(patient => {
     const button = element('button', 'patient-row' + (patient.id === state.selected ? ' selected' : ''));
     button.type = 'button';
-    const name = patient.full_name || '未填写姓名';
+    const name = (patient.full_name || '未填写姓名').replaceAll(' · ', '：');
     const copy = element('span', 'row-copy');
     copy.append(element('strong', '', name), element('span', 'mono', patient.id));
     button.append(element('span', 'avatar', name.slice(0, 1)), copy);
@@ -106,12 +106,12 @@ function range() {
 
 async function selectPatient(patient) {
   state.selected = patient.id; clearDetail(); renderPatients();
-  text('patient-name', patient.full_name || '未填写姓名'); text('patient-id', '账号 ID · ' + patient.id);
+  text('patient-name', (patient.full_name || '未填写姓名').replaceAll(' · ', '：')); text('patient-id', '账号 ID · ' + patient.id);
   show('no-patient', false); show('patient-detail');
-  await loadOverview();
+  await loadOverview(true);
 }
 
-async function loadOverview() {
+async function loadOverview(initial = false) {
   if (!state.selected) return;
   state.request?.abort(); const controller = new AbortController(); state.request = controller;
   const id = state.selected, scope = state.scope;
@@ -120,6 +120,12 @@ async function loadOverview() {
     const params = new URLSearchParams({ ...range(), scope });
     const data = await api(`/api/v1/clinical/patients/${encodeURIComponent(id)}/overview?${params}`, { signal: controller.signal });
     if (controller.signal.aborted || id !== state.selected || scope !== state.scope) return;
+    if (initial === true && data.study) {
+      const latest = new Date(new Date(data.study.period_end).getTime() - (data.study.dataset === 'OhioT1DM' ? 300000 : 1));
+      document.querySelectorAll('[data-days]').forEach(button => button.classList.remove('selected'));
+      $('range-start').value = localDate(latest); $('range-end').value = localDate(latest);
+      return await loadOverview();
+    }
     state.overview = data; renderOverview(); text('detail-status', ''); show('clinical-content');
   } catch (error) {
     if (error.name === 'AbortError' || !state.access) return;
@@ -135,7 +141,12 @@ function renderOverview() {
   const data = state.overview; if (!data) return;
   // Explicit demonstration account, never inferred from a patient's health values.
   const demo = data.patient.username === 'antang_demo_patient';
-  show('demo-notice', demo); text('record-legend', demo ? '模拟演示记录' : '已保存记录');
+  show('demo-notice', demo); show('public-notice', data.patient.username.startsWith('uci_diabetes_')); text('record-legend', demo ? '模拟演示记录' : '已保存记录');
+  show('study-notice', !!data.study);
+  if (data.study) {
+    const notice = data.study.dataset === 'OhioT1DM' ? '匿名研究记录；日期已由原数据集脱敏平移，原时区未提供，以下按浏览器时区显示。' : data.study.provenance.notice;
+    text('study-notice', `${data.study.dataset} · ${notice} 数据范围：${localDate(new Date(data.study.period_start))} 至 ${localDate(new Date(new Date(data.study.period_end).getTime()-1))}。`);
+  }
   const unit = $('glucose-unit').value, label = unit === 'mg' ? 'mg/dL' : 'mmol/L';
   const value = n => n === null || n === undefined ? '—' : glucoseValue(n, unit).toFixed(unit === 'mg' ? 0 : 1);
   const points = data.glucose.points, summary = data.glucose.summary;
@@ -143,8 +154,10 @@ function renderOverview() {
   text('glucose-count', summary.count.toLocaleString()); text('glucose-average', value(summary.average_mg_dl));
   text('glucose-range', `${value(summary.minimum_mg_dl)} / ${value(summary.maximum_mg_dl)}`);
   text('glucose-latest', value(points.at(-1)?.value_mg_dl)); text('glucose-latest-time', points.length ? dateTime(points.at(-1).measured_at) : '所选时间范围内尚无记录');
-  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, label: `${demo ? "模拟演示 · " : ""}${sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
+  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, label: `${demo ? "模拟演示 · " : ""}${sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, gapHours: data.study?.dataset === 'OhioT1DM' ? 0.25 : 6, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
   text('glucose-note', data.glucose.truncated ? `该范围共 ${summary.count} 条记录，曲线展示最新 ${points.length} 条；请缩短范围查看更早细节。上方统计按全部记录计算。` : `共 ${summary.count} 条有效血糖记录，已撤回记录不参与曲线与统计。时间按当前浏览器时区显示。`);
+  text('sampling-note', data.study?.dataset === 'OhioT1DM' ? 'CGM 原始采样约每 5 分钟一次；超过 15 分钟的缺口断开，不插值。数据集日期已脱敏平移，可能晚于当前日期，不代表实时测量。' : '仅连接同来源、间隔不超过 6 小时的相邻记录；离散测量不能代表连续血糖。');
+  renderStudy(data);
   text('value-heading', '血糖 · ' + label);
   const rows = points.slice(-100).reverse().map(point => {
     const row = element('tr');
@@ -153,8 +166,10 @@ function renderOverview() {
   });
   if (!rows.length) { const cell = element('td', '', '此时间范围内暂无有效血糖记录'); cell.colSpan = 5; const row = element('tr'); row.append(cell); rows.push(row); }
   $('glucose-records').replaceChildren(...rows); text('records-caption', `显示最新 ${Math.min(points.length, 100)} 条 / 共 ${summary.count} 条`);
+  show('wearable-heading', data.wearable.sources.length > 0); show('wearable-sources', data.wearable.sources.length > 0);
   renderWearable(data); renderProfile(data.profile);
-  const dataRows = [['血糖手工 / 报告记录', summary.count ? `该时段 ${summary.count} 条` : '该时段暂无记录'], ['血糖设备自动同步', '尚未接入'], ['手环已同步数据', data.wearable.sources.length ? `${data.wearable.sources.length} 个独立来源` : '该时段暂无记录']];
+  const dataRows = [['已保存血糖记录', summary.count ? `该时段 ${summary.count} 条` : '该时段暂无记录'], ['血糖设备自动同步', '尚未接入'], ['手环已同步数据', data.wearable.sources.length ? `${data.wearable.sources.length} 个独立来源` : '该时段暂无记录']];
+  text('data-source-note', data.study?.dataset === 'OhioT1DM' ? '已导入 OhioT1DM CGM、胰岛素及饮食研究记录；未接入患者血糖设备实时同步。' : data.study?.dataset === 'CGM PDF' ? '本样本只有原报告摘要，没有逐点血糖数据；摘要不是本系统根据采样重新计算的结果。' : '当前显示已保存记录，血糖设备自动同步尚未接入。');
   $('data-status').replaceChildren(...dataRows.map(([name, status]) => { const row = element('div', 'data-row'); row.append(element('span', '', name), element('span', '', status)); return row; }));
 }
 
@@ -256,3 +271,27 @@ setInterval(async () => {
   catch (error) { if (state.access) await expireScope('无法确认全部患者查看权限，已锁定该视图。' + error.message); }
 }, 20000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.access && state.selected) void loadOverview(); });
+
+const studyKinds = {bolus:'胰岛素追加剂量',basal:'基础输注率',temp_basal:'临时基础率',meal:'饮食碳水',finger_stick:'指尖血糖'};
+function renderStudy(data) {
+  const study = data.study; show('study-card', !!study); if (!study) return;
+  text('study-title', study.dataset === 'CGM PDF' ? 'CGM 原报告摘要' : '胰岛素与饮食记录');
+  text('study-drug', study.insulin_type ? `胰岛素类型（原始记录）：${study.insulin_type}` : '本数据未提供胰岛素或其他药物信息');
+  const report = study.provenance.report;
+  show('report-metrics', !!report); show('study-events-area', !report);
+  if (report) {
+    const labels = {mean_glucose:'报告平均葡萄糖',sd:'报告标准差',cv:'报告变异系数',estimated_hba1c:'报告估算 HbA1c'};
+    $('report-metrics').replaceChildren(...Object.entries(report.metrics).map(([key,value]) => element('p','',`${labels[key]}：${value}`)),element('p','caption',`来源：${report.file}，${report.pages} 页。报告范围 ${report.start} 至 ${report.end}。未从 AGP 图或每日曲线反推采样；原报告参考区间可能因人群而异。`));
+    return;
+  }
+  text('study-count', `所选范围共 ${study.event_count} 条事件；${study.events_truncated ? '图和明细仅显示最新1000条，请缩短范围。' : '均已显示。'} 基础率单位 U/h，追加剂量单位 U，不能直接相加；临时基础率在有效期内覆盖常规基础率，0 表示暂停。`);
+  eventChart($('study-chart'), study.events, data.period_start, data.period_end);
+  const rows = study.events.slice(-100).reverse().map(event => {
+    const row=element('tr');
+    for (const value of [dateTime(event.measured_at),event.ended_at ? dateTime(event.ended_at) : '—',studyKinds[event.kind],`${event.value} ${event.unit}`,event.detail || '—',event.source_ref]) row.append(element('td','',value));
+    return row;
+  });
+  if (!rows.length) {const row=element('tr');const cell=element('td','','该范围没有胰岛素、饮食或指尖血糖记录');cell.colSpan=6;row.append(cell);rows.push(row);}
+  $('study-events').replaceChildren(...rows);
+  text('study-detail-note',`明细显示本次返回记录的末尾 ${Math.min(100,study.events.length)} 条；扩展输注保留起止时间，未计算跨时段总剂量。`);
+}

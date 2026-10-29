@@ -1,3 +1,4 @@
+from antang_api.models.study import StudySubject as StudySubject, StudyEvent as StudyEvent
 from antang_api.models.clinical_access import ClinicalAccessSession, ClinicalAccessSettings
 from antang_api.models.agent_tool_call import AgentToolCall, AgentToolCallStatus
 from antang_api.models.behavior import (

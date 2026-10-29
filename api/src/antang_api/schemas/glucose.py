@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 GlucoseContext = Literal[
     "fasting", "pre_meal", "post_meal", "bedtime", "night", "other"
 ]
-GlucoseSource = Literal["manual", "report"]
+GlucoseSource = Literal["manual", "report", "public_dataset", "ohio_cgm"]
 
 
 class GlucoseReadingCreate(BaseModel):
