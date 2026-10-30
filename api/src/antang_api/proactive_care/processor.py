@@ -282,6 +282,7 @@ class ProactiveCareProcessor:
                     user_id=task.user_id,
                     now=now,
                     profile=await read_latest_assessment(session, task.user_id),
+                    preferred=care_settings.weekly_contact_limit,
                 )
                 if quota.exhausted:
                     resumes_at = quota.resumes_at

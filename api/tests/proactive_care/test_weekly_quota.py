@@ -19,6 +19,7 @@ from antang_api.models import (
 )
 from antang_api.proactive_care.quota import (
     DEFAULT_WEEKLY_LIMIT,
+    MAX_WEEKLY_LIMIT,
     WEEK,
     weekly_quota,
 )
@@ -175,3 +176,49 @@ async def test_a_contact_older_than_a_week_does_not_take_a_slot(
 
     assert quota.used == 1
     assert quota.exhausted is False
+
+
+async def test_the_number_the_patient_chose_beats_the_quadrant(
+    committed_user_id: UUID,
+) -> None:
+    now = datetime.now(timezone.utc)
+    # 评估说这一格该有 4 次，但患者自己只愿意被问 1 次。
+    impaired = PsychosocialProfile(
+        fear_behavior_percent=90,
+        fear_worry_percent=90,
+        gold_score=6,
+    )
+    async with session_factory() as session:
+        await _seed_sent_contact(
+            session,
+            user_id=committed_user_id,
+            sent_at=now - timedelta(hours=20),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        quota = await weekly_quota(
+            session,
+            user_id=committed_user_id,
+            now=now,
+            profile=impaired,
+            preferred=1,
+        )
+
+    assert quota.limit == 1
+    assert quota.exhausted is True
+    assert quota.resumes_at == now - timedelta(hours=20) + WEEK
+
+
+async def test_a_number_above_seven_is_capped(committed_user_id: UUID) -> None:
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        quota = await weekly_quota(
+            session,
+            user_id=committed_user_id,
+            now=now,
+            profile=None,
+            preferred=99,
+        )
+
+    assert quota.limit == MAX_WEEKLY_LIMIT

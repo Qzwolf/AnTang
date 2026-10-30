@@ -31,6 +31,9 @@ WEEK = timedelta(days=7)
 # 也不因为没数据就把人晾一周。评估一旦有了结果，就按四象限的剂量走。
 DEFAULT_WEEKLY_LIMIT = 3
 
+# 患者自己能定的上限，与迁移里的 CHECK 约束保持一致：再多就不是陪伴，是打扰。
+MAX_WEEKLY_LIMIT = 7
+
 # 额度刚空出来的那一秒就立刻发容易被察觉成「定时炸弹」，但也不能因此拖过
 # 任务过期时间；这里只留一分钟余量，让简历次到期时间时不会落在过去。
 _TAIL = timedelta(minutes=1)
@@ -76,12 +79,22 @@ async def weekly_quota(
     user_id,
     now: datetime,
     profile: PsychosocialProfile | None,
+    preferred: int | None = None,
 ) -> WeeklyQuota:
-    """算出这个患者本周还剩几次主动联系，以及什么时候会腾出下一次。"""
+    """算出这个患者本周还剩几次主动联系，以及什么时候会腾出下一次。
 
-    limit = (
-        profile.weekly_contact_limit if profile is not None else DEFAULT_WEEKLY_LIMIT
-    )
+    `preferred` 是患者自己在设置里定的次数；他没定（NULL）时才按评估的四象限剂量走。
+    患者定的优先，因为「愿意被问几次」他自己最清楚——但上限仍是 7，再高就不是陪伴了。
+    """
+
+    if preferred is not None:
+        limit = min(max(preferred, 1), MAX_WEEKLY_LIMIT)
+    else:
+        limit = (
+            profile.weekly_contact_limit
+            if profile is not None
+            else DEFAULT_WEEKLY_LIMIT
+        )
     contacts = list(
         (
             await session.scalars(

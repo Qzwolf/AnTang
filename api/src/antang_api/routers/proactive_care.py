@@ -48,9 +48,14 @@ async def _with_budget(
 
     payload = ProactiveCareSettingsPayload.model_validate(care_settings)
     profile = await read_latest_assessment(session, user_id)
-    payload.weekly_contact_limit = (
-        profile.weekly_contact_limit if profile is not None else None
-    )
+    if care_settings.weekly_contact_limit is None:
+        # 患者没自己定，就把评估算出来的剂量显示给他看，并说明是评估给的。
+        payload.weekly_contact_limit = (
+            profile.weekly_contact_limit if profile is not None else None
+        )
+        payload.weekly_contact_limit_source = "assessment"
+    else:
+        payload.weekly_contact_limit_source = "patient"
     count = await session.scalar(
         select(func.count())
         .select_from(Message)
@@ -132,6 +137,8 @@ async def put_care_settings(
     care_settings.timezone = request.timezone
     care_settings.quiet_hours_start = request.quiet_hours_start
     care_settings.quiet_hours_end = request.quiet_hours_end
+    # null = 交回给评估决定；非空就是患者自己定的次数（schema 已限制 1–7）。
+    care_settings.weekly_contact_limit = request.weekly_contact_limit
     care_settings.health_notification_preview_enabled = (
         request.health_notification_preview_enabled
     )

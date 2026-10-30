@@ -1896,6 +1896,62 @@ async def test_a_full_week_moves_the_routine_check_in_to_the_next_free_slot(
         )
 
 
+async def test_the_patients_own_number_moves_the_check_in_sooner(
+    committed_user_id: UUID,
+) -> None:
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(days=3)
+    await _seed_sent_routine_contacts(committed_user_id, sent_at_each=[oldest])
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        # 患者自己把上限压到一周一次：评估的剂量再高也不该多发。
+        care_settings.weekly_contact_limit = 1
+        task = ProactiveCareTask(
+            user_id=committed_user_id,
+            kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+            status=ProactiveCareTaskStatus.SCHEDULED,
+            due_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(days=5),
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+    draft_graph = FakeGraph(
+        ProactiveCareDecision(
+            action="send",
+            message="这条不该发出去。",
+            reason="日常问候到期",
+        )
+    )
+    processor = ProactiveCareProcessor(
+        agent=cast(Any, draft_graph),
+        auditor=cast(
+            Any,
+            FakeGraph(ProactiveCareAudit(decision="approve", reason="内容安全")),
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+    )
+
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+    assert not draft_graph.calls
+    async with session_factory() as session:
+        task = await session.get(ProactiveCareTask, task_id)
+        assert task is not None
+        assert task.status == ProactiveCareTaskStatus.SCHEDULED
+        assert task.outcome_reason == "weekly_contact_limit"
+        assert task.due_at == oldest + timedelta(days=7)
+
+
 async def test_a_full_week_that_outlives_the_task_schedules_a_new_one(
     committed_user_id: UUID,
 ) -> None:
