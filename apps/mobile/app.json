@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.antang.app",
-      "versionCode": 26102504,
+      "versionCode": 26102505,
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.health.READ_STEPS",
@@ -43,7 +43,7 @@
       "favicon": "./assets/favicon.png"
     },
     "extra": {
-      "buildCommit": "194d77a",
+      "buildCommit": "35087b2",
       "eas": {
         "projectId": "d04128ba-7ddd-4df4-a952-d52a8a9bea68"
       }
