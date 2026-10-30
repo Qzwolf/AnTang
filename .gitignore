@@ -39,3 +39,10 @@ artifacts/
 
 # Local meeting handouts are not source deliverables.
 docs/meetings/
+
+# Research datasets (Ohio T1DM XML, public diabetes sets, exports) never ship:
+# the importers take a local --root path and read files in place.
+data/
+datasets/
+*.parquet
+*.feather

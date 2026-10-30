@@ -83,6 +83,7 @@ def test_render_says_what_was_measured_and_where_it_came_from() -> None:
             below_target_count=1,
             in_target_count=0,
             above_target_count=0,
+            below_70_count=1,
         ),
         recent=[reading],
     )
@@ -110,6 +111,7 @@ def test_no_readings_means_no_context_block() -> None:
             below_target_count=0,
             in_target_count=0,
             above_target_count=0,
+            below_70_count=0,
         ),
         recent=[],
     )

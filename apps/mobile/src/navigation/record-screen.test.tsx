@@ -5,17 +5,25 @@ import type { GlucoseReading, GlucoseSummary, MealLog, MedicationLog } from "../
 import { RecordScreen, formatGlucose, formatMeasuredAt, trendSeries } from "./record-screen";
 import { fakeGadgetbridge, fakeHealthConnect } from "./device-controllers.fake";
 
+/**
+ * 这些断言本来就是「本机时区里显示成几点」，所以按本地时间构造。
+ * 写死 `+08:00` 的固定偏移在 CI（UTC runner）上会整体挪 8 小时，测试就红了。
+ */
+function atLocal(month: number, day: number, hour: number, minute = 0): string {
+  return new Date(2026, month - 1, day, hour, minute).toISOString();
+}
+
 const READING: GlucoseReading = {
   id: "00000000-0000-0000-0000-000000000001",
   valueMgDl: 99,
-  measuredAt: "2026-10-24T12:35:00+08:00",
+  measuredAt: atLocal(10, 24, 12, 35),
   context: "fasting",
   source: "manual",
   sourceDevice: "",
   measuredPrecision: "exact",
   note: "早上好",
   revokedAt: null,
-  createdAt: "2026-10-24T12:36:00+08:00",
+  createdAt: atLocal(10, 24, 12, 36),
 };
 
 const SUMMARY: GlucoseSummary = {
@@ -33,21 +41,21 @@ const SUMMARY: GlucoseSummary = {
 
 const MEAL: MealLog = {
   id: "00000000-0000-0000-0000-000000000002",
-  eatenAt: "2026-10-24T12:30:00+08:00",
+  eatenAt: atLocal(10, 24, 12, 30),
   mealType: "lunch",
   description: "一碗米饭、青菜、鸡胸",
   carbsGrams: 65,
-  createdAt: "2026-10-24T12:31:00+08:00",
+  createdAt: atLocal(10, 24, 12, 31),
 };
 
 const MEDICATION: MedicationLog = {
   id: "00000000-0000-0000-0000-000000000003",
-  takenAt: "2026-10-24T07:50:00+08:00",
+  takenAt: atLocal(10, 24, 7, 50),
   name: "诺和锐",
   doseText: "6 单位",
   kind: "insulin",
   note: "早餐前",
-  createdAt: "2026-10-24T07:51:00+08:00",
+  createdAt: atLocal(10, 24, 7, 51),
 };
 
 const DASHBOARD = {
@@ -518,7 +526,7 @@ describe("record formatting", () => {
   });
 
   it("formats the measurement time as month-day hour:minute", () => {
-    const text = formatMeasuredAt("2026-10-24T12:35:00+08:00");
-    expect(text).toMatch(/^10-2[34] \d{2}:\d{2}$/);
+    const text = formatMeasuredAt(atLocal(10, 24, 12, 35));
+    expect(text).toBe("10-24 12:35");
   });
 });
