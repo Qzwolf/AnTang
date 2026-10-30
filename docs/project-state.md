@@ -611,17 +611,28 @@ ruff 干净、pyright 0 errors（本机没有 `pyright.exe`，用 `.venv\Scripts
 本地那份 `9ae8449` 内容相同）。等 `github.com` 通了要 `git fetch team && git reset --hard
 team/aya/nav-v2-team-merge` 把两边对齐——**REST 推上去的提交和本地提交哈希不同，别装作没发生**。
 
+### 2026-10-30 深夜：每周最多联系几次，从「建议」变成真的闸门
 
+`psychosocial.support` 里的四象限剂量（高恐惧+感知受损 4、低恐惧+感知受损 5、其余 2/3，没评估按 3）一直只是写进提示词的一句话，模型可以不理；程序侧只有「两条日常问候至少隔 24 小时」这一条间隔。
 
+现在 `api/src/antang_api/proactive_care/quota.py` 数近七天真正发出去的主动消息（消息 + 任务 + 连起来的 `AgentRun`，和「最近一次主动联系」同一套口径），到上限就按下面的规则处理：
 
+- 还没到上限：照常起草。
+- 到上限且额度在任务过期前会腾出来：任务回 `SCHEDULED`，原因 `weekly_contact_limit`，`due_at` 设成「最早那条掉出七天窗口」的时刻。
+- 到上限且额度腾出来时任务已过期：任务 `EXPIRED`（原因 `weekly_contact_limit_expired`），并按用户自己的日常节奏排下一次，不让人从此收不到问候。
 
+没有心理社会评估时按中间档 3 次算；有评估结果就按四象限的剂量走。健康事件、一次性提醒、计划回访不受这条限制（它们本来就是 `must_send`）。
 
+测试：`api/tests/proactive_care/test_weekly_quota.py` 三例（中间档默认 3、四象限 4 次的边界、超过七天的不占名额）+ `test_processor.py` 两例（额度用完时把任务推到下一次可用时刻且不惊动起草 Agent；额度腾出来前任务已过期时排新任务）。后端全量 606 passed（4 个 Windows 上已知的 asyncio 用例失败，与本批无关），`ruff`、`pyright` 干净。
 
+### 2026-10-31：一周几次，让患者自己说了算
 
+上一批把「每周不超过 N 次」变成了真闸门，但 N 只由心理社会评估的四象限算出来——患者能在设置页看到这个数字，改不了。有人明明只想要一周一次，也有人希望多问两句；**次数是最该交给本人的参数**。
 
+- 数据：`proactive_care_settings.weekly_contact_limit`（可空，迁移 `n3c4d5e6f7a8`，CHECK `ck_proactive_care_weekly_limit` 限制 1–7）。空 = 跟着评估走；非空 = 患者自己定的。
+- 为什么不让填 0：0 次等于关掉日常问候，那是 `routine_cadence` 的开关。允许 0 会让设置页出现两个互相矛盾的「关掉」，也让人分不清「我关了」和「系统替我关了」（后者记在 `auto_paused_at`）。
+- 为什么封顶 7：一天不止一次的主动联系不是陪伴，是打扰；这条上限是产品边界，不是技术限制。
+- `quota.weekly_quota(..., preferred=)` 里患者定的优先，其次评估剂量，最后默认 3；`processor.py` 的日常问候分支把 `care_settings.weekly_contact_limit` 传进去。
+- 接口：`GET/PUT /api/v1/proactive-care/settings` 的 `weekly_contact_limit` 变为可写，响应多一个 `weekly_contact_limit_source`（`patient` / `assessment`），设置页才说得清「这个数字是你定的，还是评估算的」。PUT 传 `null` = 交回给评估。
 
-
-
-
-
-
+测试：`test_weekly_quota.py` 两例（患者选 1 次压过四象限的 4 次、填 99 被夹到 7）+ `test_processor.py` 一例（患者设 1 次时，只发过一条也要等到那条掉出七天）+ `test_routes.py` 一例（PUT 2 → `source=patient`；传 null → `source=assessment`；0 和 8 都被 422 拒绝）。后端全量 **610 passed**（4 个 Windows asyncio 用例失败，与本批无关）。

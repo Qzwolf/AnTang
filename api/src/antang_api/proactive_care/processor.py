@@ -61,6 +61,7 @@ from antang_api.proactive_care.heart_rate_shadow import (
     HeartRateShadowResult,
     evaluate_heart_rate_shadow,
 )
+from antang_api.proactive_care.quota import weekly_quota
 from antang_api.proactive_care.service import (
     has_scheduled_routine_replacement,
     schedule_routine_check_in,
@@ -276,6 +277,52 @@ class ProactiveCareProcessor:
                 return
 
             if task.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN:
+                quota = await weekly_quota(
+                    session,
+                    user_id=task.user_id,
+                    now=now,
+                    profile=await read_latest_assessment(session, task.user_id),
+                    preferred=care_settings.weekly_contact_limit,
+                )
+                if quota.exhausted:
+                    resumes_at = quota.resumes_at
+                    if resumes_at is None:
+                        raise RuntimeError(
+                            "每周主动联系额度用完了，却算不出下一次的可用时间"
+                        )
+                    if resumes_at >= task.expires_at:
+                        _end_claim(
+                            task,
+                            status=ProactiveCareTaskStatus.EXPIRED,
+                            reason="weekly_contact_limit_expired",
+                            now=now,
+                        )
+                        await schedule_routine_check_in(
+                            session,
+                            user_id=task.user_id,
+                            after=now,
+                            reset_existing=False,
+                        )
+                    else:
+                        task.attempt_count -= 1
+                        if await has_scheduled_routine_replacement(session, task):
+                            _end_claim(
+                                task,
+                                status=ProactiveCareTaskStatus.CANCELLED,
+                                reason="routine_replaced",
+                                now=now,
+                            )
+                        else:
+                            _end_claim(
+                                task,
+                                status=ProactiveCareTaskStatus.SCHEDULED,
+                                reason="weekly_contact_limit",
+                                now=now,
+                                due_at=resumes_at,
+                            )
+                    await session.commit()
+                    return
+
                 last_proactive_message = aliased(Message)
                 last_proactive_contact_at = await session.scalar(
                     select(last_proactive_message.created_at)

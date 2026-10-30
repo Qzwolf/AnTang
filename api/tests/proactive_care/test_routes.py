@@ -93,8 +93,54 @@ async def test_care_settings_get_returns_the_registered_users_defaults(
     # 没有做过量表：上限还未知，本周 0 次；关着但不是我们替它停的。
     assert payload["weekly_contact_count"] == 0
     assert payload["weekly_contact_limit"] is None
+    assert payload["weekly_contact_limit_source"] == "assessment"
     assert payload["auto_paused"] is False
     assert payload["auto_downgraded_at"] is None
+
+
+async def test_the_patient_can_choose_how_often_we_may_check_in(
+    client: AsyncClient,
+) -> None:
+    auth = await register(client, "care_settings_limit")
+    body = {
+        "routine_cadence": "daily",
+        "plan_follow_up_enabled": True,
+        "health_events_enabled": False,
+        "timezone": "Asia/Shanghai",
+        "quiet_hours_start": "22:00",
+        "quiet_hours_end": "08:00",
+        "health_notification_preview_enabled": False,
+        "weekly_contact_limit": 2,
+    }
+
+    saved = await client.put(
+        "/api/v1/proactive-care/settings",
+        headers=auth_headers(auth),
+        json=body,
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["weekly_contact_limit"] == 2
+    assert saved.json()["weekly_contact_limit_source"] == "patient"
+
+    # 传 null 就是交回给评估决定。
+    hand_back = await client.put(
+        "/api/v1/proactive-care/settings",
+        headers=auth_headers(auth),
+        json={**body, "weekly_contact_limit": None},
+    )
+    assert hand_back.status_code == 200
+    assert hand_back.json()["weekly_contact_limit"] is None
+    assert hand_back.json()["weekly_contact_limit_source"] == "assessment"
+
+    # 0 次等于关掉问候，那是 routine_cadence 的开关；8 次以上不像陪伴。
+    for nonsense in (0, 8):
+        refused = await client.put(
+            "/api/v1/proactive-care/settings",
+            headers=auth_headers(auth),
+            json={**body, "weekly_contact_limit": nonsense},
+        )
+        assert refused.status_code == 422
 
 
 async def test_care_settings_put_replaces_every_setting_atomically(
