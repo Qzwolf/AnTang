@@ -586,6 +586,32 @@ ruff 干净、pyright 0 errors。
 - 教训：两支队伍各自扩同一个 CHECK 约束时，别指望「谁后跑谁赢」，要么提前约定同一份
   来源表，要么在合并点显式并起来。
 
+### 2026-10-30 傍晚：团队 CI 三个红点，以及 github.com 打不通时怎么推
+
+PR #27 的两个 job（`api`、`mobile`）一开始都是红的，三个原因都在我们这边：
+
+- `api/uv.lock` 没锁 `pypdf`：`uv sync --frozen` 装出来的环境里 pyright 解析不到
+  `from pypdf import PdfReader`。`uv lock --project api` 重锁，现在锁到 `pypdf 6.21.4`。
+- 两处 `GlucoseSummary(...)` 字面量少了 `below_70_count`（兼容旧包时加进 TypedDict 的键），
+  pyright 报 `No overloads for "__init__" match the provided arguments`。
+- `measured-time.test.ts` 与 `record-screen.test.tsx` 里的「记录于」断言用固定 `+08:00`
+  时间戳构造、再经本机时区渲染：本地 `TZ=Asia/Shanghai` 过，CI runner 是 UTC，整体挪八小时。
+  改成按本地时间构造（`atLocal(月, 日, 时, 分)`）再断言 `toBe("10-24 12:35")`，时区无关。
+  **以后凡是要断言「界面上显示几点」，一律按本地时间构造夹具。**
+
+验证：`TZ=UTC` 下移动端 55 套 339 例全过、tsc 与 `expo lint` 干净；后端 600 passed、
+ruff 干净、pyright 0 errors（本机没有 `pyright.exe`，用 `.venv\Scripts\pyright-python.exe`）。
+顺带把 `data/`、`datasets/`、`*.parquet`、`*.feather` 写进 `.gitignore`：Ohio T1DM 与公共
+糖尿病数据集只在本机 `--root` 目录里读，永远不进仓库。
+
+推不上去的时候：本机 `github.com`（解析到 `20.205.243.166`）443 连不上、`api.github.com`
+正常，`git push` 报 `Recv failure: Connection was reset`。`api.github.com` 走 REST 仍可用，
+所以这一笔是用 `git cat-file blob` 取内容 → `POST /git/blobs` → `POST /git/trees`（`base_tree`）
+→ `POST /git/commits` → `PATCH /git/refs/heads/<branch>` 推的（提交 `a356856`，
+本地那份 `9ae8449` 内容相同）。等 `github.com` 通了要 `git fetch team && git reset --hard
+team/aya/nav-v2-team-merge` 把两边对齐——**REST 推上去的提交和本地提交哈希不同，别装作没发生**。
+
+
 
 
 
