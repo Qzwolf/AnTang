@@ -668,6 +668,27 @@ class BehaviorLogResponse(BaseModel):
     occurred_at: datetime
 
 
+class ClinicianBehaviorLogResponse(BaseModel):
+    """医护端看到的一条行为记录。
+
+    与患者端两点差别：① 包含患者删掉的记录，并标出 `deleted_by_patient`；
+    ② 不提供删除入口——医护只能读，不能替患者抹掉。
+    """
+
+    id: UUID
+    kind: str
+    label: str
+    count: int
+    note: str | None
+    occurred_at: datetime
+    deleted_by_patient: bool
+
+
+class ClinicianBehaviorLogsResponse(BaseModel):
+    days: int
+    items: list[ClinicianBehaviorLogResponse]
+
+
 class BeliefEventResponse(BaseModel):
     """一条信念观测。quote 是患者原话，删掉这条观测等于连那句原话一起删。"""
 

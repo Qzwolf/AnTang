@@ -81,6 +81,7 @@ async def prepare_chat_context(
     tool_result_cleanup_trigger_tokens: int,
     recent_tool_results_to_keep: int,
     tools: Sequence[BaseTool] | None = None,
+    conversation_id: UUID | None = None,
 ) -> PreparedChatContext:
     """组装上下文，先清理旧工具结果，必要时再压缩对话一次。"""
 
@@ -92,6 +93,7 @@ async def prepare_chat_context(
         session,
         user_id,
         through_message_id,
+        conversation_id,
     )
 
     # SQLAlchemy 的 SELECT 也会自动开启事务。上下文已经转换成普通的
@@ -135,6 +137,7 @@ async def prepare_chat_context(
         user_id,
         through_message_id,
         recent_messages_to_keep,
+        conversation_id=conversation_id,
     )
 
     # 用户新摘要重建上下文
@@ -142,6 +145,7 @@ async def prepare_chat_context(
         session,
         user_id,
         through_message_id,
+        conversation_id,
     )
 
     # 与第一次组装一样，精确计数走外部接口前先释放数据库连接。

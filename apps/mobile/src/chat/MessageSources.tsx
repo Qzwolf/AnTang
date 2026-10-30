@@ -22,6 +22,28 @@ function sourceDomain(url: string) {
   return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
 }
 
+/**
+ * 医学回答末尾的那句固定提示由提示词原样要求，这里把它拆出来渲染成灰色小字：
+ * 正文负责解释，灰字负责划清「这是知识参考，不是处方」。
+ * 只认句末原句，不做模糊匹配——猜错会把正常正文误染灰。
+ */
+const MEDICAL_NOTE =
+  '以上是健康知识参考，不能替代医生的诊断和处方；用药调整请先联系你的医生。';
+const MEDICAL_NOTE_ALT =
+  '以上是健康知识参考，不能替代医生的诊断和处方。用药调整请先联系你的医生。';
+
+export function splitMedicalNote(content: string): {
+  body: string;
+  note: string | null;
+} {
+  const trimmed = content.trimEnd();
+  for (const note of [MEDICAL_NOTE, MEDICAL_NOTE_ALT]) {
+    if (!trimmed.endsWith(note)) continue;
+    return { body: trimmed.slice(0, -note.length).trimEnd(), note };
+  }
+  return { body: content, note: null };
+}
+
 /** 只把后端确认过、并且出现在 sources 中的严格 [S数字] 变成链接。 */
 export function MessageSources({
   content,
@@ -32,15 +54,22 @@ export function MessageSources({
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const sourcesById = new Map(sources.map((source) => [source.sourceId, source]));
   const userTone = tone === 'user';
+  const { body, note } = splitMedicalNote(content);
 
   return (
     <>
       <MessageMarkup
-        content={content}
+        content={body}
         onOpenSource={(source) => openSource(source, onOpenError)}
         sourcesById={sourcesById}
         tone={tone}
       />
+
+      {note === null ? null : (
+        <Text style={[styles.medicalNote, userTone && styles.userMedicalNote]}>
+          {note}
+        </Text>
+      )}
 
       {sources.length === 0 ? null : (
         <View
@@ -243,5 +272,12 @@ const styles = StyleSheet.create({
   userSourceTitle: { color: '#F8FCFA' },
   assistantSourceSecondary: { color: '#68766F' },
   userSourceSecondary: { color: '#CCE7DA' },
+  medicalNote: {
+    marginTop: 10,
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#91A19E',
+  },
+  userMedicalNote: { color: '#CCE7DA' },
   pressed: { opacity: 0.62 },
 });

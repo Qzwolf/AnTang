@@ -35,6 +35,20 @@ jest.mock('expo-intent-launcher', () => ({
   startActivityAsync: jest.fn(async () => undefined),
 }));
 
+// 图片附件下载会把字节写到缓存文件；测试里只记录调用。
+jest.mock('expo-file-system/legacy', () => ({
+  cacheDirectory: 'file:///cache/',
+  EncodingType: { UTF8: 'utf8', Base64: 'base64' },
+  readAsStringAsync: jest.fn(async () => ''),
+  writeAsStringAsync: jest.fn(async () => undefined),
+  deleteAsync: jest.fn(async () => undefined),
+}));
+
+jest.mock('expo-sharing', () => ({
+  isAvailableAsync: jest.fn(async () => true),
+  shareAsync: jest.fn(async () => undefined),
+}));
+
 // 安全存储没有原生实现，用一份内存实现替身；测试可以用 __resetSecureStore()
 // 在两个用例之间把键值清干净。
 jest.mock('expo-secure-store', () => {
@@ -50,3 +64,8 @@ jest.mock('expo-secure-store', () => {
     }),
   };
 });
+
+jest.mock('expo-image-manipulator', () => ({
+  SaveFormat: { JPEG: 'jpeg' },
+  manipulateAsync: jest.fn(async (uri: string) => ({ uri, width: 1568, height: 1176 })),
+}));

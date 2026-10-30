@@ -35,8 +35,6 @@ type Props = {
   onClose: () => void;
   onDisableBackgroundHealth: () => Promise<void>;
   onEnableBackgroundHealth: () => Promise<void>;
-  onLogout: () => void;
-  onAccountDeleted: () => void;
   onRequestNotificationPermission: () => Promise<unknown>;
   visible: boolean;
 };
@@ -91,8 +89,6 @@ export function CareSettingsModal({
   onClose,
   onDisableBackgroundHealth,
   onEnableBackgroundHealth,
-  onLogout,
-  onAccountDeleted,
   onRequestNotificationPermission,
   visible,
 }: Props) {
@@ -101,10 +97,6 @@ export function CareSettingsModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deletePassword, setDeletePassword] = useState('');
-  const [deleteRunning, setDeleteRunning] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible) return;
@@ -144,8 +136,14 @@ export function CareSettingsModal({
     setError(null);
     try {
       const saved = await api.putProactiveCareSettings({
-        ...settings,
+        routineCadence: settings.routineCadence,
+        planFollowUpEnabled: settings.planFollowUpEnabled,
+        healthEventsEnabled: settings.healthEventsEnabled,
         timezone: deviceTimeZone(),
+        quietHoursStart: settings.quietHoursStart,
+        quietHoursEnd: settings.quietHoursEnd,
+        healthNotificationPreviewEnabled:
+          settings.healthNotificationPreviewEnabled,
       });
       setSettings(saved);
       onClose();
@@ -153,22 +151,6 @@ export function CareSettingsModal({
       setError(errorMessage(reason));
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function deleteAccount() {
-    if (deleteRunning || deletePassword.length === 0) return;
-    setDeleteRunning(true);
-    setDeleteError(null);
-    try {
-      await api.deleteAccount(deletePassword);
-      setDeletePassword('');
-      setDeleteOpen(false);
-      onAccountDeleted();
-    } catch (reason) {
-      setDeleteError(errorMessage(reason));
-    } finally {
-      setDeleteRunning(false);
     }
   }
 
@@ -289,6 +271,49 @@ export function CareSettingsModal({
                       );
                     })}
                   </View>
+                  <Text selectable style={styles.description}>
+                    本周已主动联系 {settings.weeklyContactCount} 次
+                    {settings.weeklyContactLimit === null
+                      ? '，上限按沟通方式自评来算。'
+                      : ` · 上限 ${settings.weeklyContactLimit} 次。`}
+                  </Text>
+                  {settings.autoPaused ? (
+                    <View style={styles.pausedCard}>
+                      <Text style={styles.pausedText}>
+                        连着几次问候你没回，我先停下来了，不想在你忙的时候反复弹消息。想继续就说一声。
+                      </Text>
+                      <Pressable
+                        accessibilityLabel="继续接收日常问候"
+                        accessibilityRole="button"
+                        disabled={disabled}
+                        onPress={() => {
+                          update({ routineCadence: 'daily' });
+                          void api
+                            .putProactiveCareSettings({
+                              routineCadence: 'daily',
+                              planFollowUpEnabled: settings.planFollowUpEnabled,
+                              healthEventsEnabled: settings.healthEventsEnabled,
+                              timezone: deviceTimeZone(),
+                              quietHoursStart: settings.quietHoursStart,
+                              quietHoursEnd: settings.quietHoursEnd,
+                              healthNotificationPreviewEnabled:
+                                settings.healthNotificationPreviewEnabled,
+                            })
+                            .then(
+                              (saved) => {
+                                setSettings(saved);
+                              },
+                              (reason) => {
+                                setError(errorMessage(reason));
+                              },
+                            );
+                        }}
+                        style={styles.pausedButton}
+                      >
+                        <Text style={styles.pausedButtonText}>继续接收</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
                 </View>
 
                 <View style={styles.section}>
@@ -460,106 +485,6 @@ export function CareSettingsModal({
                     {saving ? '正在保存…' : '保存设置'}
                   </Text>
                 </Pressable>
-
-                <View style={styles.accountSection}>
-                  <View style={styles.accountCopy}>
-                    <Text style={styles.sectionTitle}>账号</Text>
-                    <Text style={styles.description}>
-                      退出后，聊天记录仍保存在当前账号中。
-                    </Text>
-                  </View>
-                  <Pressable
-                    accessibilityLabel="退出当前账号"
-                    accessibilityRole="button"
-                    disabled={disabled}
-                    onPress={onLogout}
-                    style={({ pressed }) => [
-                      styles.logoutButton,
-                      pressed && styles.buttonPressed,
-                    ]}
-                  >
-                    <Text style={styles.logoutButtonText}>退出登录</Text>
-                  </Pressable>
-                </View>
-
-                <View style={styles.deleteSection}>
-                  <View style={styles.accountCopy}>
-                    <Text style={styles.sectionTitle}>注销账号</Text>
-                    <Text style={styles.description}>
-                      注销会删除这个账号的全部档案、对话、手环记录和陪伴记忆，无法恢复。
-                    </Text>
-                  </View>
-                  {deleteOpen ? (
-                    <View style={styles.deleteForm}>
-                      <TextInput
-                        accessibilityLabel="注销账号时输入登录密码"
-                        autoCapitalize="none"
-                        editable={!deleteRunning}
-                        onChangeText={setDeletePassword}
-                        placeholder="输入登录密码确认"
-                        placeholderTextColor={colors.muted}
-                        secureTextEntry
-                        style={styles.deleteInput}
-                        value={deletePassword}
-                      />
-                      <Text style={styles.description}>
-                        这不是退出登录。确认后数据立即删除，无法找回。
-                      </Text>
-                      {deleteError === null ? null : (
-                        <Text style={styles.deleteErrorText}>{deleteError}</Text>
-                      )}
-                      <View style={styles.deleteActions}>
-                        <Pressable
-                          accessibilityLabel="取消注销账号"
-                          accessibilityRole="button"
-                          disabled={deleteRunning}
-                          onPress={() => {
-                            setDeleteOpen(false);
-                            setDeletePassword('');
-                            setDeleteError(null);
-                          }}
-                          style={({ pressed }) => [
-                            styles.deleteCancelButton,
-                            pressed && styles.buttonPressed,
-                          ]}
-                        >
-                          <Text style={styles.deleteCancelText}>取消</Text>
-                        </Pressable>
-                        <Pressable
-                          accessibilityLabel="确认注销并删除全部数据"
-                          accessibilityRole="button"
-                          disabled={deleteRunning || deletePassword.length === 0}
-                          onPress={() => void deleteAccount()}
-                          style={({ pressed }) => [
-                            styles.deleteConfirmButton,
-                            (pressed || deleteRunning || deletePassword.length === 0) &&
-                              styles.buttonDisabled,
-                          ]}
-                        >
-                          <Text style={styles.deleteConfirmText}>
-                            {deleteRunning ? '正在注销…' : '确认注销'}
-                          </Text>
-                        </Pressable>
-                      </View>
-                    </View>
-                  ) : (
-                    <Pressable
-                      accessibilityLabel="注销账号"
-                      accessibilityRole="button"
-                      disabled={disabled}
-                      onPress={() => {
-                        setDeleteOpen(true);
-                        setDeleteError(null);
-                      }}
-                      style={({ pressed }) => [
-                        styles.deleteOpenButton,
-                        pressed && styles.buttonPressed,
-                      ]}
-                    >
-                      <Text style={styles.deleteOpenText}>注销账号</Text>
-                    </Pressable>
-                  )}
-                </View>
               </>
             )}
           </ScrollView>
@@ -732,6 +657,30 @@ const styles = StyleSheet.create({
     backgroundColor: colors.disabled,
   },
   statusDotEnabled: { backgroundColor: colors.primary },
+  pausedCard: {
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+    padding: spacing.sm,
+    borderRadius: radii.md,
+    backgroundColor: colors.paperMuted,
+  },
+  pausedText: {
+    fontSize: 12.5,
+    lineHeight: 19,
+    color: colors.muted,
+  },
+  pausedButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: radii.pill,
+    backgroundColor: colors.primarySoft,
+  },
+  pausedButtonText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: colors.primaryPressed,
+  },
   timeRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -797,89 +746,6 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontFamily: typefaces.sansMedium,
     fontSize: 12,
-  },
-  accountSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    padding: spacing.md,
-  },
-  accountCopy: { flex: 1, gap: spacing.xxs },
-  logoutButton: {
-    minHeight: 44,
-    justifyContent: 'center',
-    paddingHorizontal: spacing.md,
-    borderRadius: radii.pill,
-    backgroundColor: colors.dangerSoft,
-  },
-  logoutButtonText: {
-    color: colors.danger,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 13,
-  },
-  deleteSection: {
-    gap: spacing.sm,
-    padding: spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.line,
-  },
-  deleteOpenButton: {
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: colors.danger,
-  },
-  deleteOpenText: {
-    color: colors.danger,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 13,
-  },
-  deleteForm: { gap: spacing.sm },
-  deleteInput: {
-    minHeight: 44,
-    paddingHorizontal: spacing.md,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderColor: colors.line,
-    color: colors.text,
-    fontFamily: typefaces.sans,
-    fontSize: 14,
-  },
-  deleteErrorText: {
-    color: colors.danger,
-    fontFamily: typefaces.sans,
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  deleteActions: { flexDirection: 'row', gap: spacing.sm },
-  deleteCancelButton: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: colors.line,
-  },
-  deleteCancelText: {
-    color: colors.muted,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 13,
-  },
-  deleteConfirmButton: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.pill,
-    backgroundColor: colors.danger,
-  },
-  deleteConfirmText: {
-    color: '#FFFFFF',
-    fontFamily: typefaces.sansMedium,
-    fontSize: 13,
   },
   buttonDisabled: { opacity: 0.55 },
 });

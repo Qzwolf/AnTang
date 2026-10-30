@@ -97,6 +97,11 @@ class Message(Base):
         )
     )
 
+    # 属于哪一段对话。历史数据在迁移里归到每个人最早的那一段。
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), index=True
+    )
+
     content: Mapped[str] = mapped_column(Text)
 
     # 最终回答实际引用的网页快照。详细工具结果仍保存在 agent_tool_calls。

@@ -127,3 +127,133 @@ async def test_deployed_instrument_remains_available_only_to_patients(client, db
     for role in (UserRole.CLINICIAN, UserRole.RESEARCHER):
         await set_user_role(db_session, username=patient["user"]["username"], role=role, maintainer="test-sync")
         assert (await client.get(path, headers=headers)).status_code == 403
+
+
+async def test_a_saved_report_summary_is_readable_only_by_its_patient(
+    client, db_session
+):
+    """报告速览是患者自己的数据：别人看不到。"""
+
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from antang_api.health_profile.glucose import record_glucose_report
+    from antang_api.models import User
+
+    path = "/api/v1/health-profile/glucose-reports"
+    assert (await client.get(path)).status_code == 401
+
+    patient, headers = await signup(client)
+    _, second_headers = await signup(client)
+    user = (
+        await db_session.execute(
+            select(User).where(User.username == patient["user"]["username"])
+        )
+    ).scalar_one()
+    await record_glucose_report(
+        db_session,
+        user_id=user.id,
+        period_start=date(2024, 5, 30),
+        period_end=date(2024, 6, 11),
+        device="硅基动感Pro",
+        mean_mmol=6.29,
+        tir_percent=84.5,
+    )
+    await db_session.commit()
+
+    mine = await client.get(path, headers=headers)
+    assert mine.status_code == 200, mine.text
+    items = mine.json()["items"]
+    assert len(items) == 1
+    assert items[0]["period_start"] == "2024-05-30"
+    assert float(items[0]["tir_percent"]) == 84.5
+    assert items[0]["note"] is None
+
+    assert (await client.get(path, headers=second_headers)).json()["items"] == []
+
+
+async def test_a_patient_can_delete_a_report_summary_but_not_someone_elses(
+    client, db_session
+):
+    """删报告速览是真删：自己删得掉，别人的那条连「存在」都不该暴露。"""
+
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from antang_api.health_profile.glucose import record_glucose_report
+    from antang_api.models import User
+
+    path = "/api/v1/health-profile/glucose-reports"
+    patient, headers = await signup(client)
+    _, second_headers = await signup(client)
+    user = (
+        await db_session.execute(
+            select(User).where(User.username == patient["user"]["username"])
+        )
+    ).scalar_one()
+    report = await record_glucose_report(
+        db_session,
+        user_id=user.id,
+        period_start=date(2025, 7, 28),
+        period_end=date(2025, 7, 31),
+        device="硅基动感Pro",
+        lbgi_level="high",
+    )
+    await db_session.commit()
+    report_id = str(report.id)
+
+    assert (await client.delete(f"{path}/{report_id}")).status_code == 401
+    # 别人的报告：404，而不是 403——别让「这份存在」变成可探测的信息。
+    assert (
+        await client.delete(f"{path}/{report_id}", headers=second_headers)
+    ).status_code == 404
+    assert len((await client.get(path, headers=headers)).json()["items"]) == 1
+
+    removed = await client.delete(f"{path}/{report_id}", headers=headers)
+    assert removed.status_code == 204, removed.text
+    assert (await client.get(path, headers=headers)).json()["items"] == []
+    # 删第二次就是没找到，不是静默成功。
+    assert (
+        await client.delete(f"{path}/{report_id}", headers=headers)
+    ).status_code == 404
+
+
+async def test_a_patient_sets_their_own_glucose_target_range(client):
+    """目标范围是患者的设置：改完统计和界面都按他的算，别人的不受影响。"""
+
+    target = "/api/v1/health-profile/glucose-target"
+    assert (await client.get(target)).status_code == 401
+
+    _, headers = await signup(client)
+    _, second_headers = await signup(client)
+
+    default = await client.get(target, headers=headers)
+    assert default.status_code == 200, default.text
+    assert default.json() == {"low_mg_dl": 70, "high_mg_dl": 180}
+
+    changed = await client.put(
+        target, headers=headers, json={"low_mg_dl": 80, "high_mg_dl": 160}
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json() == {"low_mg_dl": 80, "high_mg_dl": 160}
+
+    summary = await client.get(
+        "/api/v1/health-profile/glucose-readings/summary", headers=headers
+    )
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["target_low_mg_dl"] == 80
+    assert summary.json()["target_high_mg_dl"] == 160
+
+    # 别人的范围没被改。
+    other = await client.get(target, headers=second_headers)
+    assert other.json() == {"low_mg_dl": 70, "high_mg_dl": 180}
+
+    # 下限不小于上限是错，不是悄悄修好。
+    assert (
+        await client.put(
+            target, headers=headers, json={"low_mg_dl": 200, "high_mg_dl": 100}
+        )
+    ).status_code == 422
+

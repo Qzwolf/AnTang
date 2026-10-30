@@ -37,6 +37,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ChatStreamEvent,
+  Conversation,
   MessageHistory,
   User,
 } from '../api/types';
@@ -49,28 +50,28 @@ import {
   ReportPickerScreen,
 } from './attachment-flows';
 import { chatReducer, initialChatState } from './chat-state';
+import { shrinkPhoto } from './photo-size';
 import { formatVoiceDuration, mergeTranscriptIntoDraft } from './voice-recording';
 import { useVoiceInput } from './useVoiceInput';
 import { VOICE_INPUT_ENABLED } from '../config';
 import { MessageSources } from './MessageSources';
 import { HealthProfileCards } from '../health-profile/health-profile-cards';
 import { useHealthProfileCards } from '../health-profile/use-health-profile-cards';
-import { useHealthConnect } from '../health-connect/use-health-connect';
-import { useGadgetbridge } from '../health-connect/useGadgetbridge';
+import type {
+  GadgetbridgeController,
+  HealthConnectController,
+} from '../navigation/device-channels';
 import { HealthOverviewScreen } from '../health-overview';
 import { HealthDashboardScreen } from '../health/HealthDashboardScreen';
 import { PatientAccessScreen } from '../patient-access/patient-access-screen';
 import { GlucoseScreen } from '../glucose/GlucoseScreen';
-import {
-  LiveHeartRateProvider,
-  useLiveHeartRateController,
-} from '../live-heart-rate/LiveHeartRateProvider';
+import { GlucoseImportScreen } from '../glucose/GlucoseImportScreen';
+import { useLiveHeartRateControllerOrNull } from '../live-heart-rate/LiveHeartRateProvider';
 import type { LiveHeartRateController } from '../live-heart-rate/use-live-heart-rate';
 import { AppMenu, type ConversationAnchor } from '../navigation/app-menu';
 import { useNotifications } from '../notifications/use-notifications';
 import { CareSettingsModal } from '../proactive-care/care-settings-modal';
 import { SettingsScreen } from '../settings/settings-screen';
-import { DeleteAccountScreen } from '../settings/delete-account-screen';
 import { UpdatePrompt } from '../update/update-prompt';
 import { useUpdateCheck } from '../update/use-update-check';
 import { BrandMark } from '../ui/brand-mark';
@@ -80,8 +81,26 @@ import { colors, radii, spacing, typefaces } from '../ui/theme';
 type Props = {
   api: ApiClient;
   user: User;
-  onSignedOut: () => void;
+  /** 手环两条通道挂在 App 外壳上，这里只用来展示关怀设置与看板。 */
+  healthConnect: HealthConnectController;
+  gadgetbridge: GadgetbridgeController;
+  /**
+   * 从底部 tab 的「我的 / 记录」请求打开某一页。
+   * 用一个自增的 id 传递，避免「同一页连点两次」时状态相同而不触发。
+   */
+  pageRequest?: { page: ChatPage; id: number } | null;
+  /** 侧边栏头像 → 底部「我的」tab。 */
+  onOpenProfile?: () => void;
 };
+
+export type ChatPage =
+  | 'health'
+  | 'dashboard'
+  | 'glucose'
+  | 'importSensor'
+  | 'patientAccess'
+  | 'care'
+  | 'settings';
 
 const dayFormatter = new Intl.DateTimeFormat('zh-CN', {
   month: 'long',
@@ -100,14 +119,59 @@ function localDay(value: string): string {
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
+// 医疗口径提醒只在这条回复真的谈到诊断、用药、剂量、检验读数时出现。
+// 每条都挂等于免责声明噪音，读者会当它不存在。
+const MEDICAL_TOPICS =
+  /(诊断|处方|用药|剂量|药物|胰岛素|口服药|化验|检验|报告|指标|读数|血压|血脂|糖化|并发症|治疗|手术)/;
+const EMERGENCY_SIGNS =
+  /(昏迷|意识不清|抽搐|酮症|酸中毒|呼吸困难|胸痛|剧烈|急诊|叫救护车)/;
+
+/**
+ * 回复底下那行灰字。
+ *
+ * 只做「知识参考 + 听医生的」这一件事：不重复回复内容、不吓人、不写成长段免责声明。
+ * 提到危险信号时多加一句立刻就医，措辞按患者能听懂的说法（不写「请即刻就医」这种公文腔）。
+ */
+export function medicalFootnote(text: string): string | null {
+  if (!MEDICAL_TOPICS.test(text)) return null;
+  const base =
+    '以上是健康知识参考，不能替代医生的诊断和处方。具体用药请按医生给你的方案。';
+  if (EMERGENCY_SIGNS.test(text)) {
+    return `${base}如果出现意识不清、抽搐、呼吸困难或很难受，请立刻联系急救，别等回复。`;
+  }
+  return base;
+}
+
+/**
+ * 隔了这么久再说话就算另一次对话（和后端 `SESSION_GAP` 一致）：离开几小时
+ * 回来，不该接着上一次那一段，也不该把历史全堆在一条里。
+ */
+export const SESSION_GAP_MS = 6 * 3_600_000;
+
+function staleSession(value: string | null): boolean {
+  if (value === null) return false;
+  const at = new Date(value).getTime();
+  if (Number.isNaN(at)) return false;
+  return Date.now() - at > SESSION_GAP_MS;
+}
+
 function conversationGroup(value: string): string {
   const date = new Date(value);
-  const today = new Date();
-  const yesterday = new Date();
-  yesterday.setDate(today.getDate() - 1);
-  if (localDay(value) === localDay(today.toISOString())) return '今天';
-  if (localDay(value) === localDay(yesterday.toISOString())) return '昨天';
-  return `${date.getMonth() + 1}月${date.getDate()}日`;
+  const now = new Date();
+  if (localDay(value) === localDay(now.toISOString())) return '今天';
+  const ageDays = (now.getTime() - date.getTime()) / 86_400_000;
+  if (ageDays < 7) return '近 7 天';
+  if (ageDays < 30) return '近 30 天';
+  return '更早';
+}
+
+/** 每条都带具体日期与时刻——只给「3 天前」这类相对说法，过一周就分不清了。 */
+function conversationStamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${month}-${day} ${timeFormatter.format(date)}`;
 }
 
 /**
@@ -129,17 +193,37 @@ export function currentLiveHeartRate(
   };
 }
 
-export function ChatScreen({ api, user, onSignedOut }: Props) {
-  // 实时心率会话挂在聊天页根组件上，切换健康看板、对话和健康档案都不会断开。
+export function ChatScreen({
+  api,
+  user,
+  pageRequest = null,
+  onOpenProfile,
+  healthConnect,
+  gadgetbridge,
+}: Props) {
+  // 实时心率会话由 App 外壳的 LiveHeartRateProvider 提供，四个 tab 共用一条 BLE 连接。
   return (
-    <LiveHeartRateProvider active>
-      <ChatScreenContent api={api} onSignedOut={onSignedOut} user={user} />
-    </LiveHeartRateProvider>
+    <ChatScreenContent
+      api={api}
+      gadgetbridge={gadgetbridge}
+      healthConnect={healthConnect}
+      onOpenProfile={onOpenProfile}
+      pageRequest={pageRequest}
+      user={user}
+    />
   );
 }
 
-function ChatScreenContent({ api, user, onSignedOut }: Props) {
-  const liveHeartRate = useLiveHeartRateController();
+function ChatScreenContent({
+  api,
+  user,
+  onOpenProfile,
+  healthConnect,
+  gadgetbridge,
+  pageRequest = null,
+}: Props) {
+  // 会话由 App 外壳提供；单独渲染聊天页（例如测试里）时没有 Provider，就当成没有心率。
+  const liveHeartRate = useLiveHeartRateControllerOrNull();
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
   const [draft, setDraft] = useState('');
   const [historyReady, setHistoryReady] = useState(false);
@@ -147,11 +231,12 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
   const [showNewMessage, setShowNewMessage] = useState(false);
   const [showCareSettings, setShowCareSettings] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [showHealthOverview, setShowHealthOverview] = useState(false);
   // ===== 新增：健康看板 =====
   const [showDashboard, setShowDashboard] = useState(false);
   const [showGlucose, setShowGlucose] = useState(false);
+  const [showImportSensor, setShowImportSensor] = useState(false);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [showReportPicker, setShowReportPicker] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -168,31 +253,50 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
     [state.messages],
   );
   const healthProfileCards = useHealthProfileCards(api);
-  const healthConnect = useHealthConnect(user.id, api);
   const updateCheck = useUpdateCheck();
-  const gadgetbridge = useGadgetbridge(api);
   const refreshHealthProfileCards = healthProfileCards.refresh;
   const getAttachmentImageSource = useCallback(
     (attachmentId: string) => api.getChatAttachmentImageSource(attachmentId),
     [api],
   );
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const conversationAnchors = useMemo<ConversationAnchor[]>(
     () =>
-      state.messages
+      conversations
+        // 点了「新的对话」却一句没说的空段不占位（当前正打开的那段除外）。
         .filter(
-          (message) =>
-            message.role === 'user' && message.content.trim().length > 0,
+          (conversation) =>
+            conversation.messageCount > 0 || conversation.id === conversationId,
         )
-        .slice(-16)
-        .reverse()
-        .map((message) => ({
-          group: conversationGroup(message.createdAt),
-          id: message.id,
-          preview: message.content.replace(/\s+/g, ' ').trim(),
-          time: timeFormatter.format(new Date(message.createdAt)),
+        .map((conversation) => ({
+          group: conversationGroup(
+            conversation.lastMessageAt ?? conversation.createdAt,
+          ),
+          id: conversation.id,
+          title: conversation.title,
+          time: conversationStamp(
+            conversation.lastMessageAt ?? conversation.createdAt,
+          ),
         })),
-    [state.messages],
+    [conversationId, conversations],
   );
+
+  useEffect(() => {
+    if (pageRequest === null) return;
+    // 放到下一个 tick：effect 里同步 setState 会触发级联渲染（expo lint 会拦）。
+    const timer = setTimeout(() => {
+      setShowMenu(false);
+      if (pageRequest.page === 'health') setShowHealthOverview(true);
+      if (pageRequest.page === 'dashboard') setShowDashboard(true);
+      if (pageRequest.page === 'glucose') setShowGlucose(true);
+      if (pageRequest.page === 'importSensor') setShowImportSensor(true);
+      if (pageRequest.page === 'patientAccess') setShowPatientAccess(true);
+      if (pageRequest.page === 'care') setShowCareSettings(true);
+      if (pageRequest.page === 'settings') setShowSettings(true);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [pageRequest]);
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener('keyboardDidShow', () =>
@@ -232,12 +336,18 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
   }, []);
 
   const fetchLatest = useCallback(async () => {
+    // 还没开新会话时不要顺手把「最近一段」的历史拉进来——那段已经过去很久了，
+    // 拉进来会让人以为自己在接着聊，其实是一段旧对话。
+    if (conversationId === null) {
+      await refreshHealthProfileCards();
+      return { messages: [], nextBefore: null } satisfies MessageHistory;
+    }
     const [page] = await Promise.all([
-      api.getMessages(),
+      api.getMessages(null, conversationId),
       refreshHealthProfileCards(),
     ]);
     return page;
-  }, [api, refreshHealthProfileCards]);
+  }, [api, conversationId, refreshHealthProfileCards]);
 
   const applyLatest = useCallback((page: MessageHistory) => {
     dispatch({
@@ -264,25 +374,106 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
 
   useEffect(() => {
     let active = true;
-    void fetchLatest().then(
-      (page) => {
+    void (async () => {
+      try {
+        const existing = await api.getConversations();
+        const newest = existing[0];
+        if (!active) return;
+        setConversations(existing);
+        if (
+          newest === undefined ||
+          staleSession(newest.lastMessageAt ?? newest.createdAt)
+        ) {
+          // 上次聊天已经过去很久：从一段空白开始，旧对话留在侧边栏里可以回去看。
+          setConversationId(null);
+          dispatch({
+            type: 'history-replaced',
+            messages: [],
+            nextBefore: null,
+          });
+          setHistoryReady(true);
+          return;
+        }
+        setConversationId(newest.id);
+        const page = await api.getMessages(null, newest.id);
         if (active) applyLatest(page);
-      },
-      (error) => {
+      } catch (error) {
         if (active) {
           dispatch({ type: 'history-failed', message: errorMessage(error) });
         }
-      },
-    );
+      }
+    })();
     return () => {
       active = false;
       streamController.current?.abort();
     };
-  }, [applyLatest, fetchLatest]);
+  }, [api, applyLatest]);
+
+  /** 侧边栏的列表要跟着最新的消息走，否则时间停在打开 App 那一刻。 */
+  const refreshConversations = useCallback(async () => {
+    try {
+      const latest = await api.getConversations();
+      setConversations(latest);
+    } catch {
+      // 列表刷新失败不该打断正在进行的聊天，下次打开侧边栏会再试。
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (!showMenu) return;
+    // 放进下一拍：直接在这里拉列表会同步 setState，触发 react-hooks 的告警。
+    const timer = setTimeout(() => void refreshConversations(), 0);
+    return () => clearTimeout(timer);
+  }, [refreshConversations, showMenu]);
+
+  /** 发消息时才真正建会话：只点开 App 不该在列表里留下一段空对话。 */
+  const ensureConversation = useCallback(async (): Promise<string> => {
+    if (conversationId !== null) return conversationId;
+    const conversation = await api.startConversation();
+    setConversations((current) => [conversation, ...current]);
+    setConversationId(conversation.id);
+    return conversation.id;
+  }, [api, conversationId]);
+
+  const openConversation = useCallback(
+    async (id: string) => {
+      if (streamController.current !== null) return;
+      setShowMenu(false);
+      // 点的就是当前这段：不用重拉，否则整屏消息会闪一下。
+      if (id === conversationId && historyReady) return;
+      setConversationId(id);
+      dispatch({ type: 'history-loading' });
+      try {
+        applyLatest(await api.getMessages(null, id));
+      } catch (error) {
+        dispatch({ type: 'history-failed', message: errorMessage(error) });
+      }
+    },
+    [api, applyLatest, conversationId, historyReady],
+  );
+
+  const startNewConversation = useCallback(async () => {
+    if (streamController.current !== null) return;
+    try {
+      const conversation = await api.startConversation();
+      setConversations((current) => [conversation, ...current]);
+      setConversationId(conversation.id);
+      setShowMenu(false);
+      dispatch({
+        type: 'history-replaced',
+        messages: [],
+        nextBefore: null,
+      });
+      setHistoryReady(true);
+    } catch (error) {
+      dispatch({ type: 'history-failed', message: errorMessage(error) });
+    }
+  }, [api]);
 
   const notifications = useNotifications({
     api,
     userId: user.id,
+    conversationId,
     historyReady: historyReady && !state.historyLoading,
     streamActive: state.pendingRequestId !== null,
     onMessages: mergeNotificationMessages,
@@ -334,7 +525,7 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
     if (state.nextBefore === null || state.historyLoading) return;
     dispatch({ type: 'history-loading' });
     try {
-      const page = await api.getMessages(state.nextBefore);
+      const page = await api.getMessages(state.nextBefore, conversationId);
       dispatch({
         type: 'history-prepended',
         messages: page.messages,
@@ -398,8 +589,10 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
     if (selectedAttachment !== null) {
       setUploadingAttachment(true);
       try {
-        uploadedAttachment = await api.uploadChatAttachment(selectedAttachment);
-        uploadedAttachment.localUri = selectedAttachment.uri;
+        // 照片先缩到长边 1568 再上传：模型那边一整张图看得清，也省流量。
+        const prepared = await shrinkPhoto(selectedAttachment);
+        uploadedAttachment = await api.uploadChatAttachment(prepared);
+        uploadedAttachment.localUri = prepared.uri;
       } catch (error) {
         dispatch({ type: 'history-failed', message: errorMessage(error) });
         return;
@@ -415,6 +608,13 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
     }
 
     const clientMessageId = randomUUID();
+    let targetConversationId: string;
+    try {
+      targetConversationId = await ensureConversation();
+    } catch (error) {
+      dispatch({ type: 'history-failed', message: errorMessage(error) });
+      return;
+    }
     await runChatStream(
       clientMessageId,
       () => {
@@ -435,28 +635,11 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
           uploadedAttachment?.id ?? null,
           onEvent,
           signal,
-          currentLiveHeartRate(liveHeartRate),
+          liveHeartRate === null ? null : currentLiveHeartRate(liveHeartRate),
+          targetConversationId,
         ),
     );
-  }
-
-  async function logout() {
-    setShowMenu(false);
-    streamController.current?.abort();
-    healthConnect.stop();
-    try {
-      await api.logout();
-      onSignedOut();
-    } catch (error) {
-      dispatch({ type: 'history-failed', message: errorMessage(error) });
-    }
-  }
-
-  function accountDeleted() {
-    setShowMenu(false);
-    streamController.current?.abort();
-    healthConnect.stop();
-    onSignedOut();
+    void refreshConversations();
   }
 
   function cancelCurrentResponse() {
@@ -484,6 +667,13 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         dispatch({ type: 'history-failed', message: '找不到这次发送的原消息。' });
         return;
       }
+      let targetConversationId: string;
+      try {
+        targetConversationId = await ensureConversation();
+      } catch (error) {
+        dispatch({ type: 'history-failed', message: errorMessage(error) });
+        return;
+      }
       await runChatStream(
         clientMessageId,
         () =>
@@ -501,6 +691,8 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
             userMessage.attachments[0]?.id ?? null,
             onEvent,
             signal,
+            undefined,
+            targetConversationId,
           ),
       );
       return;
@@ -532,10 +724,18 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
       previousMessage === undefined ||
       localDay(previousMessage.createdAt) !== localDay(message.createdAt);
 
+    const waitingFirstToken =
+      assistant && message.status === 'generating' && message.content.length === 0;
     const showBubble =
-      message.content.length > 0 || message.status !== 'generating';
+      message.content.length > 0 ||
+      message.status !== 'generating' ||
+      assistant;
     const activity =
       assistant && message.status === 'generating' ? state.activity : null;
+    const footnote =
+      assistant && message.status === 'completed'
+        ? medicalFootnote(message.content)
+        : null;
 
     return (
       <>
@@ -575,18 +775,32 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
                   assistant ? styles.assistantBubble : styles.userBubble,
                 ]}
               >
-                <MessageSources
-                  content={message.content || '无内容'}
-                  onOpenError={(error) =>
-                    dispatch({ type: 'history-failed', message: error })
-                  }
-                  sources={
-                    assistant && message.status === 'completed'
-                      ? message.sources
-                      : []
-                  }
-                  tone={assistant ? 'assistant' : 'user'}
-                />
+                {waitingFirstToken ? (
+                  <View style={styles.thinkingRow} accessibilityLiveRegion="polite">
+                    <Text style={styles.thinkingText}>糖糖正在想</Text>
+                    <View style={styles.thinkingDots}>
+                      <View style={styles.thinkingDot} />
+                      <View style={styles.thinkingDot} />
+                      <View style={styles.thinkingDot} />
+                    </View>
+                  </View>
+                ) : (
+                  <MessageSources
+                    content={message.content || '无内容'}
+                    onOpenError={(error) =>
+                      dispatch({ type: 'history-failed', message: error })
+                    }
+                    sources={
+                      assistant && message.status === 'completed'
+                        ? message.sources
+                        : []
+                    }
+                    tone={assistant ? 'assistant' : 'user'}
+                  />
+                )}
+                {footnote === null ? null : (
+                  <Text style={styles.medicalFootnote}>{footnote}</Text>
+                )}
                 {!assistant || message.status !== 'completed' ? (
                   <View style={styles.messageMeta}>
                     <Text
@@ -656,82 +870,18 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         </View>
       </SafeAreaView>
 
-      {/* ===== Health Connect 横幅（保留原有） ===== */}
-      {!healthConnect.connected || healthConnect.error !== null ? (
+      {/* ===== 传感器导入结果 ===== */}
+      {importNotice === null ? null : (
         <Pressable
-          accessibilityLabel={
-            healthConnect.syncing ? '正在连接 Health Connect' : '去连接 Health Connect'
-          }
           accessibilityRole="button"
-          disabled={healthConnect.syncing || healthConnect.checking}
-          onPress={() => {
-            if (healthConnect.connected) setShowCareSettings(true);
-            else void healthConnect.connect().catch(() => {
-              // The connection banner renders the failure stored by useHealthConnect.
-            });
-          }}
-          style={styles.healthNotice}
+          accessibilityLabel="关闭提示"
+          onPress={() => setImportNotice(null)}
+          style={styles.importNotice}
         >
-          <Text style={styles.healthNoticeText}>
-            {healthConnect.error ??
-              healthConnect.progress ??
-              (healthConnect.checking
-                ? '正在检查手环连接…'
-                : '连接 Health Connect 后，可以在对话中查看真实手环记录。')}
-          </Text>
-          <Text style={styles.healthNoticeAction}>
-            {healthConnect.syncing
-              ? '连接中…'
-              : healthConnect.connected
-                ? '查看'
-                : '去连接'}
-          </Text>
+          <Text style={styles.importNoticeText}>{importNotice}</Text>
+          <Text style={styles.healthNoticeAction}>知道了</Text>
         </Pressable>
-      ) : null}
-
-      {/* ===== Gadgetbridge 独立横幅 ===== */}
-      <Pressable
-        accessibilityRole="button"
-        disabled={gadgetbridge.checking || gadgetbridge.syncing}
-        onPress={() => {
-          if (gadgetbridge.connected) {
-            void gadgetbridge.sync();
-          } else {
-            void gadgetbridge.connect();
-          }
-        }}
-        style={({ pressed }) => [
-          styles.gadgetbridgeNotice,
-          (gadgetbridge.checking || gadgetbridge.syncing) &&
-          styles.gadgetbridgeNoticeDisabled,
-          pressed &&
-          !gadgetbridge.checking &&
-          !gadgetbridge.syncing &&
-          styles.gadgetbridgeNoticePressed,
-        ]}
-      >
-        <View style={styles.gadgetbridgeNoticeContent}>
-          <Text style={styles.gadgetbridgeNoticeTitle}>📡 华为手环导入</Text>
-          <Text style={styles.gadgetbridgeNoticeText} numberOfLines={1}>
-            {gadgetbridge.checking
-              ? '正在检查手环数据...'
-              : gadgetbridge.syncing
-                ? '⏳ 正在同步...'
-                : gadgetbridge.error
-                  ? `⚠️ ${gadgetbridge.error}`
-                  : gadgetbridge.connected
-                    ? `已连接，${gadgetbridge.heartRateCount || 0} 条心率记录`
-                    : '选择华为手环的 Gadgetbridge 导出文件'}
-          </Text>
-        </View>
-        <Text style={styles.gadgetbridgeNoticeAction}>
-          {gadgetbridge.checking || gadgetbridge.syncing
-            ? '...'
-            : gadgetbridge.connected
-              ? '同步'
-              : '连接'}
-        </Text>
-      </Pressable>
+      )}
 
       {state.error === null ? null : (
         <Pressable
@@ -1060,33 +1210,11 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
       >
         <SettingsScreen
           onClose={() => setShowSettings(false)}
-          onLogout={() => {
-            setShowSettings(false);
-            void logout();
-          }}
-          onDeleteAccount={() => {
-            setShowSettings(false);
-            setShowDeleteAccount(true);
-          }}
           onOpenCare={() => {
             setShowSettings(false);
             setShowCareSettings(true);
           }}
           update={updateCheck}
-          username={user.username}
-        />
-      </Modal>
-
-      <Modal
-        animationType="slide"
-        onRequestClose={() => setShowDeleteAccount(false)}
-        presentationStyle="fullScreen"
-        visible={showDeleteAccount}
-      >
-        <DeleteAccountScreen
-          api={api}
-          onCancel={() => setShowDeleteAccount(false)}
-          onDeleted={accountDeleted}
         />
       </Modal>
 
@@ -1110,8 +1238,6 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
           onClose={() => setShowCareSettings(false)}
           onDisableBackgroundHealth={healthConnect.disableBackground}
           onEnableBackgroundHealth={healthConnect.enableBackground}
-          onLogout={() => void logout()}
-          onAccountDeleted={accountDeleted}
           onRequestNotificationPermission={notifications.requestPermission}
           visible
         />
@@ -1159,6 +1285,28 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
         </View>
       </Modal>
 
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setShowImportSensor(false)}
+        presentationStyle="fullScreen"
+        visible={showImportSensor}
+      >
+        <View style={{ flex: 1, backgroundColor: '#F4F6F5' }}>
+          <GlucoseImportScreen
+            api={api}
+            onBack={() => setShowImportSensor(false)}
+            onImported={(inserted) => {
+              setShowImportSensor(false);
+              setImportNotice(
+                inserted > 0
+                  ? `已导入 ${inserted} 条传感器数据`
+                  : '这份文件里没有新增数据',
+              );
+            }}
+          />
+        </View>
+      </Modal>
+
       {/* ===== 新增：健康看板 Modal ===== */}
       <HealthDashboardScreen
         api={api}
@@ -1173,41 +1321,20 @@ function ChatScreenContent({ api, user, onSignedOut }: Props) {
       </Modal> : null}
 
       <AppMenu
-        onOpenPatientAccess={() => { setShowMenu(false); setShowPatientAccess(true); }}
         conversations={conversationAnchors}
+        activeConversationId={conversationId}
+        onNewChat={() => void startNewConversation()}
         onClose={() => setShowMenu(false)}
-        onOpenHealth={() => {
+        onOpenCare={() => setShowCareSettings(true)}
+        onOpenProfile={() => {
           setShowMenu(false);
-          setShowHealthOverview(true);
+          onOpenProfile?.();
         }}
-        onOpenSettings={() => {
-          setShowMenu(false);
-          setShowSettings(true);
-        }}
-        // ===== 新增：健康看板入口 =====
-        onOpenDashboard={() => {
-          setShowMenu(false);
-          setShowDashboard(true);
-        }}
-        // ===== 新增：血糖记录入口 =====
-        onOpenGlucose={() => {
-          setShowMenu(false);
-          setShowGlucose(true);
-        }}
-        onSelectConversation={(messageId) => {
-          setTargetMessageId(messageId);
-          setShowMenu(false);
+        onSelectConversation={(id) => {
+          void openConversation(id);
         }}
         username={user.username}
         visible={showMenu}
-        gadgetbridgeChecking={gadgetbridge.checking}
-        gadgetbridgeConnected={gadgetbridge.connected}
-        gadgetbridgeSyncing={gadgetbridge.syncing}
-        gadgetbridgeError={gadgetbridge.error}
-        gadgetbridgeProgress={gadgetbridge.progress}
-        gadgetbridgeLastSyncedAt={gadgetbridge.lastSyncedAt}
-        onGadgetbridgeConnect={gadgetbridge.connect}
-        onGadgetbridgeSync={gadgetbridge.sync}
       />
 
       <ExpoStatusBar style="dark" />
@@ -1254,7 +1381,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
   },
   headerPlaceholder: { width: 44, height: 44 },
-  healthNotice: {
+  importNotice: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
@@ -1262,47 +1389,17 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     backgroundColor: colors.primarySoft,
   },
-  healthNoticeText: {
+  importNoticeText: {
     flex: 1,
     color: colors.text,
     fontFamily: typefaces.sans,
-    fontSize: 11,
+    fontSize: 11.5,
     lineHeight: 16,
   },
   healthNoticeAction: {
     color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
     fontSize: 11,
-  },
-  gadgetbridgeNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 9,
-    backgroundColor: '#F0F8FC',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#B8D9E8',
-  },
-  gadgetbridgeNoticeDisabled: { opacity: 0.5 },
-  gadgetbridgeNoticePressed: { opacity: 0.7 },
-  gadgetbridgeNoticeContent: { flex: 1, gap: 1 },
-  gadgetbridgeNoticeTitle: {
-    color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 12,
-  },
-  gadgetbridgeNoticeText: {
-    color: colors.muted,
-    fontFamily: typefaces.sans,
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  gadgetbridgeNoticeAction: {
-    color: '#0A7C6B',
-    fontFamily: typefaces.sansMedium,
-    fontSize: 12,
   },
   errorBanner: {
     flexDirection: 'row',
@@ -1459,6 +1556,31 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     backgroundColor: 'transparent',
   },
+  // 第一句话还没出来时先占一个位置，别让患者对着空白以为没发出去。
+  thinkingRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    minHeight: 30,
+  },
+  thinkingText: {
+    color: colors.muted,
+    fontFamily: typefaces.sans,
+    fontSize: 15,
+  },
+  thinkingDots: {
+    flexDirection: 'row',
+    gap: 3,
+    paddingTop: 4,
+  },
+  thinkingDot: {
+    backgroundColor: colors.faint,
+    borderRadius: radii.pill,
+    height: 4,
+    width: 4,
+  },
   messageMeta: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1472,6 +1594,16 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   assistantMessageTime: { color: colors.faint },
+  medicalFootnote: {
+    marginTop: spacing.xs,
+    paddingTop: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+    color: colors.faint,
+    fontFamily: typefaces.sans,
+    fontSize: 11.5,
+    lineHeight: 17,
+  },
   userMessageTime: { color: '#D9FFF4' },
   failedStatus: {
     color: colors.danger,

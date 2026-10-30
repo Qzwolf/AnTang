@@ -104,6 +104,10 @@ class PersonalProfile(Base):
             "weight_kg IS NULL OR weight_kg > 0",
             name="ck_personal_profiles_weight_kg",
         ),
+        CheckConstraint(
+            "glucose_target_low_mg_dl > 0 AND glucose_target_low_mg_dl < glucose_target_high_mg_dl",
+            name="ck_personal_profiles_glucose_target",
+        ),
     )
 
     user_id: Mapped[UUID] = mapped_column(
@@ -118,6 +122,15 @@ class PersonalProfile(Base):
     resident_area: Mapped[str | None] = mapped_column(String(255))
     schedule_type: Mapped[str | None] = mapped_column(String(128))
     occupation: Mapped[str | None] = mapped_column(String(128))
+
+    # 血糖目标范围：医生给患者定的往往不是 3.9–10.0（老年人放宽、孕妇收紧），
+    # 所以它是患者自己的设置，不是代码里的常量。单位跟库里一致用 mg/dL。
+    glucose_target_low_mg_dl: Mapped[int] = mapped_column(
+        Integer, server_default="70"
+    )
+    glucose_target_high_mg_dl: Mapped[int] = mapped_column(
+        Integer, server_default="180"
+    )
 
     # revision 用于读取缓存；field_revisions 用于只让目标字段参与冲突检查。
     revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

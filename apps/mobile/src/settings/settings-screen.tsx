@@ -5,19 +5,17 @@ import { installedVersion } from '../update/release';
 import type { UpdateCheckState } from '../update/use-update-check';
 
 type Props = {
-  username: string;
   update: UpdateCheckState;
   onClose: () => void;
   onOpenCare: () => void;
-  onDeleteAccount: () => void;
-  onLogout: () => void;
 };
 
 function versionLabel(installed: { name: string; code: number }): string {
   return installed.code > 0 ? `${installed.name} · ${installed.code}` : installed.name;
 }
 
-function actionLabel(update: UpdateCheckState): string {  if (update.checking) return '检查中…';
+function actionLabel(update: UpdateCheckState): string {
+  if (update.checking) return '检查中…';
   if (update.release !== null) return '有新版本';
   if (update.lastResult === 'up-to-date') return '已是最新版本';
   return '检查';
@@ -33,17 +31,10 @@ function updateHint(update: UpdateCheckState): string {
 /**
  * 设置页。
  *
- * 版本与更新放在这里，侧边栏不再单独挂一行「检查更新」——那是「设置里的一件
- * 事」，不是每天要点的主功能。更新安装复用 `downloadAndInstall`，不卸载、不扫码。
+ * 只管「陪伴」与「版本」两件事；账号（退出、注销）归「我的」页最底部，避免同一批
+ * 有后果的动作在两处出现。更新安装复用 `downloadAndInstall`，不卸载、不扫码。
  */
-export function SettingsScreen({
-  username,
-  update,
-  onClose,
-  onOpenCare,
-  onDeleteAccount,
-  onLogout,
-}: Props) {
+export function SettingsScreen({ update, onClose, onOpenCare }: Props) {
   const installed = installedVersion();
 
   return (
@@ -115,33 +106,6 @@ export function SettingsScreen({
               value={update.autoCheck}
             />
           </View>
-        </View>
-
-        <Text style={styles.groupTitle}>账号</Text>
-        <View style={styles.group}>
-          <View style={styles.row}>
-            <View style={styles.rowMain}>
-              <Text style={styles.rowTitle}>已登录</Text>
-              <Text style={styles.rowSub}>{username}</Text>
-            </View>
-          </View>
-          <Pressable
-            accessibilityLabel="退出登录"
-            accessibilityRole="button"
-            onPress={onLogout}
-            style={styles.row}
-          >
-            <Text style={styles.rowTitle}>退出登录</Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="注销账号"
-            accessibilityRole="button"
-            onPress={onDeleteAccount}
-            style={styles.row}
-          >
-            <Text style={[styles.rowTitle, styles.danger]}>注销账号</Text>
-            <Text style={styles.chev}>›</Text>
-          </Pressable>
         </View>
 
         <Text style={styles.footer}>

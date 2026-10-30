@@ -36,6 +36,62 @@ _ROUTINE_INTERVALS = {
     RoutineCareCadence.WEEKLY: timedelta(days=7),
 }
 
+# 打扰预算的另一半：连续几次问候没人搭理，就自己降下来，不靠用户来发现。
+# 阈值取 2/3：一次没回可能只是忙，两次就是「这个时间点不合适」。
+_QUIET_DOWNGRADE_AFTER = 2
+_QUIET_PAUSE_AFTER = 3
+
+
+async def _unanswered_routine_streak(
+    session: AsyncSession,
+    user_id: UUID,
+) -> int:
+    """数最近连续几次日常问候没有被回应（从最近一次往前数，遇到回应就停）。"""
+
+    responses = await session.scalars(
+        select(ProactiveCareTask.response_message_id)
+        .where(
+            ProactiveCareTask.user_id == user_id,
+            ProactiveCareTask.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+            ProactiveCareTask.status == ProactiveCareTaskStatus.COMPLETED,
+        )
+        .order_by(
+            ProactiveCareTask.due_at.desc(),
+            ProactiveCareTask.id.desc(),
+        )
+        .limit(_QUIET_PAUSE_AFTER + 2)
+    )
+    streak = 0
+    for response_message_id in responses:
+        if response_message_id is not None:
+            break
+        streak += 1
+    return streak
+
+
+async def _apply_quiet_policy(
+    session: AsyncSession,
+    *,
+    care_settings: ProactiveCareSettings,
+    user_id: UUID,
+    now: datetime,
+) -> None:
+    """连续没回应就降频，再没回应就暂停；用户只要回一次就清零。"""
+
+    streak = await _unanswered_routine_streak(session, user_id)
+    care_settings.unanswered_contacts = streak
+    if streak >= _QUIET_PAUSE_AFTER:
+        if care_settings.routine_cadence != RoutineCareCadence.DISABLED:
+            care_settings.routine_cadence = RoutineCareCadence.DISABLED
+            care_settings.auto_paused_at = now
+        return
+    if (
+        streak >= _QUIET_DOWNGRADE_AFTER
+        and care_settings.routine_cadence == RoutineCareCadence.DAILY
+    ):
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.auto_downgraded_at = now
+
 
 async def has_scheduled_routine_replacement(
     session: AsyncSession,
@@ -72,6 +128,16 @@ async def schedule_routine_check_in(
     care_settings = await session.get(ProactiveCareSettings, user_id)
     if care_settings is None:
         raise RuntimeError("用户缺少主动关怀设置")
+    if reset_existing:
+        # 用户刚回来说话：不管之前积了几次没回应，都从零开始。
+        care_settings.unanswered_contacts = 0
+    else:
+        await _apply_quiet_policy(
+            session,
+            care_settings=care_settings,
+            user_id=user_id,
+            now=after,
+        )
     scheduled = await session.scalar(
         select(ProactiveCareTask)
         .where(

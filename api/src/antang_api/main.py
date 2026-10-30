@@ -12,7 +12,7 @@ from tavily import AsyncTavilyClient
 from antang_api.agents.core import build_core_agent
 from antang_api.agents.health_profile import build_profile_agent
 from antang_api.agents.tool_middleware import ToolPersistenceMiddleware
-from antang_api.chat import recover_interrupted_chat_runs
+from antang_api.chat import TOOL_ACTIVITY_PHASES, recover_interrupted_chat_runs
 from antang_api.companion_memory import CompanionMemory
 from antang_api.database import engine, session_factory
 from antang_api.knowledge import warm_knowledge_index
@@ -33,8 +33,12 @@ from antang_api.tools import (
     build_behavior_tools,
     build_care_plan_tool,
     build_glucose_read_tool,
+    build_glucose_report_delete_tool,
+    build_glucose_report_tool,
+    build_glucose_write_tool,
     build_knowledge_search_tool,
     build_profile_tool,
+    build_record_tools,
     build_wearable_read_tool,
     build_web_tools,
 )
@@ -97,7 +101,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
                 care_plan_tool = build_care_plan_tool(session_factory)
                 behavior_tools = build_behavior_tools(session_factory)
+                record_tools = build_record_tools(session_factory)
                 glucose_tool = build_glucose_read_tool(session_factory)
+                glucose_write_tool = build_glucose_write_tool(session_factory)
+                glucose_report_tool = build_glucose_report_tool(session_factory)
+                glucose_report_delete_tool = build_glucose_report_delete_tool(
+                    session_factory
+                )
                 knowledge_tool = build_knowledge_search_tool(session_factory)
                 web_tools = build_web_tools(
                     tavily_client,
@@ -111,13 +121,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     health_profile_delegate,
                     care_plan_tool,
                     glucose_tool,
+                    glucose_write_tool,
+                    glucose_report_tool,
+                    glucose_report_delete_tool,
                     *behavior_tools,
+                    *record_tools,
                 )
                 tool_middleware = ToolPersistenceMiddleware(
                     session_factory,
                     max_tool_rounds=settings.agent_max_tool_rounds,
                     max_parallel_tool_calls=(settings.agent_max_parallel_tool_calls),
                 )
+
+                # 每个工具都得有活动阶段，聊天流才知道状态栏该显示什么。
+                # 少配一个，患者那条消息会在模型开始调它的时候整个报错失败
+                # （线上真的这样挂过三次），所以在启动时就拦住，别等聊天里炸。
+                missing_phases = sorted(
+                    tool.name
+                    for tool in core_tools
+                    if tool.name not in TOOL_ACTIVITY_PHASES
+                )
+                if missing_phases:
+                    raise RuntimeError(f"工具缺少活动阶段配置：{missing_phases}")
 
                 app.state.chat_model = chat_model
                 app.state.core_tools = core_tools

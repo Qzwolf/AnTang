@@ -167,6 +167,7 @@ async def user_response(user: User, session: AsyncSession) -> UserResponse:
         role=user.role,
         full_name=user.full_name,
         application_status=application_status,
+        created_at=user.created_at,
     )
 
 

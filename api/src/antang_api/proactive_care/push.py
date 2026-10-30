@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from loguru import logger
@@ -24,6 +25,7 @@ from antang_api.models import (
     PushDeliveryStatus,
     PushInstallation,
     PushPermissionState,
+    User,
 )
 from antang_api.settings import settings
 
@@ -31,6 +33,35 @@ ExpoResult: TypeAlias = tuple[
     Literal["ok", "error", "missing"],
     str | None,
 ]
+
+# 打扰预算：同一用户 24 小时内最多收到一条系统通知。消息层已经有同样的上限
+# （processor.ORDINARY_CONTACT_INTERVAL），这里再守一道，避免回访计划与健康事件
+# 在同一天叠出第二条通知——通知比消息更吵，一旦多起来用户只会关掉整个开关。
+INTERRUPTION_BUDGET = timedelta(hours=24)
+
+# 健康事件的通知一律不带数值与病名：锁屏上的一句话可能被旁人看到，
+# 也可能把「低血糖」这三个字直接塞进用户最焦虑的时候。
+GENERIC_HEALTH_BODY = "有一条新的健康关怀消息"
+
+
+def _greeting_for(hour: int) -> str:
+    if 5 <= hour < 11:
+        return "早上"
+    if 11 <= hour < 13:
+        return "中午"
+    if 13 <= hour < 18:
+        return "下午"
+    return "晚上"
+
+
+def _care_notification_body(*, name: str, local_now: datetime) -> str:
+    """问候型通知的文案：只有称呼与问候，没有任何健康信息。"""
+
+    greeting = _greeting_for(local_now.hour)
+    who = name.strip() or "你"
+    if who == "你":
+        return f"{greeting}好。糖糖想跟你聊两句，可以吗？"
+    return f"{who}，{greeting}好。糖糖想跟你聊两句，可以吗？"
 
 
 class ExpoPushRequestError(RuntimeError):
@@ -362,18 +393,57 @@ class PushDeliveryWorker:
             assert installation.expo_push_token is not None
             assert task is not None
 
-            show_preview = delivery.show_message_preview
-            if task.kind == ProactiveCareTaskKind.HEALTH_EVENT:
-                care_settings = await session.get(
-                    ProactiveCareSettings,
-                    message.user_id,
+            budget_used_at = await session.scalar(
+                select(PushDelivery.created_at)
+                .join(
+                    PushInstallation,
+                    PushInstallation.id == PushDelivery.installation_id,
                 )
-                if care_settings is None:
-                    raise RuntimeError("用户缺少主动关怀设置")
-                show_preview = (
-                    show_preview
-                    and care_settings.health_notification_preview_enabled
+                .join(
+                    LoginSession,
+                    LoginSession.id == PushInstallation.login_session_id,
                 )
+                .where(
+                    LoginSession.user_id == message.user_id,
+                    PushDelivery.id != delivery.id,
+                    PushDelivery.created_at >= claimed_at - INTERRUPTION_BUDGET,
+                    PushDelivery.status.in_(
+                        (
+                            PushDeliveryStatus.TICKET_ACCEPTED,
+                            PushDeliveryStatus.RECEIPT_ACCEPTED,
+                            PushDeliveryStatus.SENDING,
+                        )
+                    ),
+                )
+                .order_by(PushDelivery.created_at.desc())
+                .limit(1)
+            )
+            if budget_used_at is not None:
+                # 24 小时内已经推过一条：这条不再发，消息仍留在对话页里。
+                _end_delivery(
+                    delivery,
+                    status=PushDeliveryStatus.FAILED,
+                    error_code="interruption_budget",
+                )
+                await session.commit()
+                return True
+
+            care_settings = await session.get(
+                ProactiveCareSettings,
+                message.user_id,
+            )
+            if care_settings is None:
+                raise RuntimeError("用户缺少主动关怀设置")
+
+            user = await session.get(User, message.user_id)
+            display_name = ""
+            if user is not None:
+                display_name = (user.full_name or user.username or "").strip()
+            try:
+                local_zone = ZoneInfo(care_settings.timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                local_zone = timezone.utc
+            local_now = claimed_at.astimezone(local_zone)
 
             lease_token = uuid4()
             delivery.status = PushDeliveryStatus.SENDING
@@ -398,9 +468,12 @@ class PushDeliveryWorker:
                 "to": installation.expo_push_token,
                 "title": "安糖心语",
                 "body": (
-                    message.content[:180]
-                    if show_preview
-                    else "有一条新的健康关怀消息"
+                    GENERIC_HEALTH_BODY
+                    if task.kind == ProactiveCareTaskKind.HEALTH_EVENT
+                    else _care_notification_body(
+                        name=display_name,
+                        local_now=local_now,
+                    )
                 ),
                 "data": {
                     "kind": task.kind.value,

@@ -27,6 +27,7 @@ from antang_api.agents.runtime import AgentContext
 from antang_api.behavioral import read_fear_summary, render_behavior_context
 from antang_api.companion_memory import CompanionMemory
 from antang_api.context import count_input_tokens
+from antang_api.conversations import care_conversation, touch_conversation
 from antang_api.database import (
     lock_user_conversation,
     session_factory as default_session_factory,
@@ -996,6 +997,8 @@ class ProactiveCareProcessor:
 
             result_message: Message | None = None
             if message is not None:
+                # 主动关怀单独落进一段「关怀消息」会话，侧边栏里和患者自己开的对话分开。
+                care = await care_conversation(session, user_id)
                 result_message = Message(
                     client_message_id=None,
                     user_id=user_id,
@@ -1004,7 +1007,9 @@ class ProactiveCareProcessor:
                     content=message,
                     sources=[],
                     completed_at=finished_at,
+                    conversation_id=care.id,
                 )
+                await touch_conversation(session, care, at=finished_at)
                 session.add(result_message)
                 await session.flush()
 

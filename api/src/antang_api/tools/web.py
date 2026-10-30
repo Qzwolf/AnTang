@@ -18,6 +18,11 @@ class WebToolError(ToolResponseError):
     """Tavily 返回了无法交给模型使用的结果。"""
 
 
+# 「这一页读不出来」是网站的常态（要登录、反爬、超时），不是我们内部出错：
+# 让模型知道就好，不要因此把患者的整条回复判失败。
+PAGE_UNREADABLE = "Tavily 无法提取请求的网页"
+
+
 class SearchResult(TypedDict):
     title: str
     url: str
@@ -224,7 +229,7 @@ def _normalize_fetch_content(
         raise WebToolError("Tavily extract 响应缺少 failed_results 数组")
 
     if failed_results:
-        raise WebToolError("Tavily 无法提取请求的网页")
+        raise WebToolError(PAGE_UNREADABLE)
 
     results = _response_results(response, "extract")
 
@@ -512,7 +517,20 @@ def build_web_tools(
                 fetch_max_content_chars,
             )
         except WebToolError as error:
-            raise WebToolError(str(error), artifact=artifact) from error
+            if str(error) != PAGE_UNREADABLE:
+                raise WebToolError(str(error), artifact=artifact) from error
+            return (
+                {
+                    "source_id": source_id,
+                    "title": title,
+                    "url": normalized_url,
+                    "content": (
+                        "这一页的内容打不开（可能要求登录、拒绝抓取，或者超时）。"
+                        "不要猜里面的内容：跟患者说这一页读不了，可以换个链接或把关键段落复制过来。"
+                    ),
+                },
+                artifact,
+            )
         return (
             {
                 "source_id": source_id,

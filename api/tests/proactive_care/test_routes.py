@@ -82,15 +82,19 @@ async def test_care_settings_get_returns_the_registered_users_defaults(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "routine_cadence": "disabled",
-        "plan_follow_up_enabled": True,
-        "health_events_enabled": False,
-        "timezone": "Asia/Shanghai",
-        "quiet_hours_start": "22:00",
-        "quiet_hours_end": "08:00",
-        "health_notification_preview_enabled": False,
-    }
+    payload = response.json()
+    assert payload["routine_cadence"] == "disabled"
+    assert payload["plan_follow_up_enabled"] is True
+    assert payload["health_events_enabled"] is False
+    assert payload["timezone"] == "Asia/Shanghai"
+    assert payload["quiet_hours_start"] == "22:00"
+    assert payload["quiet_hours_end"] == "08:00"
+    assert payload["health_notification_preview_enabled"] is False
+    # 没有做过量表：上限还未知，本周 0 次；关着但不是我们替它停的。
+    assert payload["weekly_contact_count"] == 0
+    assert payload["weekly_contact_limit"] is None
+    assert payload["auto_paused"] is False
+    assert payload["auto_downgraded_at"] is None
 
 
 async def test_care_settings_put_replaces_every_setting_atomically(
@@ -115,13 +119,13 @@ async def test_care_settings_put_replaces_every_setting_atomically(
     )
 
     assert response.status_code == 200
-    assert response.json() == body
+    assert {key: response.json()[key] for key in body} == body
     persisted = await client.get(
         "/api/v1/proactive-care/settings",
         headers=auth_headers(auth),
     )
     assert persisted.status_code == 200
-    assert persisted.json() == body
+    assert {key: persisted.json()[key] for key in body} == body
 
     user_id = UUID(auth["user"]["id"])
     scheduled = await db_session.scalar(

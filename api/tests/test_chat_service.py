@@ -23,6 +23,7 @@ from antang_api import chat
 from antang_api.agents.core import CoreAgentGraph
 from antang_api.agents.relative_day import subjective_day
 from antang_api.agents.runtime import AgentContext
+from antang_api.behavioral import record_behavior
 from antang_api.chat import (
     ActiveAgentRunError,
     ChatRetryError,
@@ -1771,3 +1772,101 @@ async def test_token_usage_is_not_inflated_by_repeated_chunk_snapshots(
     assert run is not None
     assert run.input_tokens == 6_200
     assert run.output_tokens == 9
+
+
+async def test_insulin_change_gets_a_non_blaming_reminder(
+    db_session: AsyncSession,
+) -> None:
+    """自己加减胰岛素：提醒由服务端补，患者看到的措辞不随模型发挥。"""
+
+    user = await create_user(db_session, "insulin_notice")
+    prepared_run = await prepare_chat_run(
+        db_session, user.id, uuid4(), "我把睡前长效减了 2 个单位"
+    )
+    record_behavior(
+        db_session,
+        user_id=user.id,
+        kind="insulin_change",
+        note="我把睡前长效减了 2 个单位",
+        source_message_id=prepared_run.user_message_id,
+    )
+    await db_session.commit()
+
+    assert await chat._insulin_notice(db_session, prepared_run) == chat.INSULIN_NOTICE
+
+
+async def test_insulin_notice_stays_quiet_for_other_behaviors(
+    db_session: AsyncSession,
+) -> None:
+    """多测一次血糖不该触发用药提醒：提醒只针对改剂量。"""
+
+    user = await create_user(db_session, "insulin_quiet")
+    prepared_run = await prepare_chat_run(db_session, user.id, uuid4(), "刚才又测了一次")
+    record_behavior(
+        db_session,
+        user_id=user.id,
+        kind="extra_check",
+        note="刚才又测了一次",
+        source_message_id=prepared_run.user_message_id,
+    )
+    await db_session.commit()
+
+    assert await chat._insulin_notice(db_session, prepared_run) is None
+
+
+async def test_a_claim_without_a_recorded_row_is_caught(
+    db_session: AsyncSession,
+) -> None:
+    """线上真事：工具参数对不上、没落库，回复却写「已经帮你记下来了」。
+
+    患者到记录页一看是空的，下次就不信了。所以服务端自己核对：
+    说了记录，就必须有一个成功的记录工具调用。
+    """
+
+    user = await create_user(db_session, "record_claim")
+    prepared_run = await prepare_chat_run(db_session, user.id, uuid4(), "吃了连花清瘟 2 颗")
+    await db_session.commit()
+
+    assert await chat._unconfirmed_record_claim(
+        db_session, prepared_run, "好嘞，已经帮你记下来了：连花清瘟胶囊，2 颗。"
+    )
+
+
+async def test_a_claimed_record_with_a_completed_tool_call_is_fine(
+    db_session: AsyncSession,
+) -> None:
+    """工具真的成功了就不再补那句纠正，否则患者会以为记录丢了。"""
+
+    user = await create_user(db_session, "record_claim_ok")
+    prepared_run = await prepare_chat_run(db_session, user.id, uuid4(), "吃了连花清瘟 2 颗")
+    db_session.add(
+        AgentToolCall(
+            agent_run_id=prepared_run.run_id,
+            tool_call_id="record-call",
+            tool_name="record_medication",
+            model_turn_index=1,
+            tool_call_index=1,
+            arguments={"name": "连花清瘟胶囊", "dose_text": "2 颗"},
+            result=json.dumps({"recorded": True}),
+            status=AgentToolCallStatus.COMPLETED,
+        )
+    )
+    await db_session.commit()
+
+    assert not await chat._unconfirmed_record_claim(
+        db_session, prepared_run, "好嘞，已经帮你记下来了：连花清瘟胶囊，2 颗。"
+    )
+
+
+async def test_ordinary_talk_is_not_mistaken_for_a_record_claim(
+    db_session: AsyncSession,
+) -> None:
+    """「好的，我记住了」是对话里的应答，不是记录承诺，不该触发纠正。"""
+
+    user = await create_user(db_session, "record_claim_quiet")
+    prepared_run = await prepare_chat_run(db_session, user.id, uuid4(), "我记住了要少吃甜的")
+    await db_session.commit()
+
+    assert not await chat._unconfirmed_record_claim(
+        db_session, prepared_run, "好的，我记住了。下次想吃甜的就先跟你聊两句。"
+    )

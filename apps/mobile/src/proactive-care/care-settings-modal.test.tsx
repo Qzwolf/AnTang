@@ -27,6 +27,10 @@ const settings: ProactiveCareSettings = {
   quietHoursStart: '22:00',
   quietHoursEnd: '08:00',
   healthNotificationPreviewEnabled: false,
+  weeklyContactCount: 3,
+  weeklyContactLimit: 4,
+  autoPaused: false,
+  autoDowngradedAt: null,
 };
 
 describe('CareSettingsModal', () => {
@@ -53,8 +57,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onEnableBackgroundHealth={enableBackgroundHealth}
           onDisableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={requestNotificationPermission}
           visible
         />,
@@ -85,9 +87,97 @@ describe('CareSettingsModal', () => {
       tree!.root.findByProps({ accessibilityLabel: '日常关怀频率：关闭' })
         .props.accessibilityState,
     ).toEqual({ selected: true });
+    act(() => tree!.unmount());
+  });
+
+  test('shows how often it may contact you and how many were used', async () => {
+    const api = {
+      getProactiveCareSettings: jest.fn().mockResolvedValue(settings),
+      putProactiveCareSettings: jest.fn(),
+    } as unknown as ApiClient;
+    let tree: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <CareSettingsModal
+          api={api}
+          backgroundHealthEnabling={false}
+          backgroundHealthDisabling={false}
+          backgroundHealthError={null}
+          backgroundHealthStatus="disabled"
+          notificationPermission="undetermined"
+          notificationRegistrationFailed={false}
+          notificationRequesting={false}
+          onClose={jest.fn()}
+          onEnableBackgroundHealth={jest.fn()}
+          onDisableBackgroundHealth={jest.fn()}
+          onRequestNotificationPermission={jest.fn()}
+          visible
+        />,
+      );
+    });
+
+    const text = tree!.root
+      .findAllByType(Text)
+      .map((node) => node.props.children)
+      .flat(Infinity)
+      .join('');
+    expect(text).toContain('本周已主动联系 3 次');
+    expect(text).toContain('上限 4 次');
     expect(
-      tree!.root.findByProps({ accessibilityLabel: '退出当前账号' }),
+      tree!.root.findAllByProps({ accessibilityLabel: '继续接收日常问候' }),
+    ).toHaveLength(0);
+    act(() => tree!.unmount());
+  });
+
+  test('lets a user who stopped answering resume the routine', async () => {
+    const paused = {
+      ...settings,
+      routineCadence: 'disabled' as const,
+      autoPaused: true,
+      autoDowngradedAt: '2026-10-20T01:00:00Z',
+    };
+    const api = {
+      getProactiveCareSettings: jest.fn().mockResolvedValue(paused),
+      putProactiveCareSettings: jest.fn().mockResolvedValue({
+        ...settings,
+        routineCadence: 'daily',
+      }),
+    } as unknown as ApiClient;
+    let tree: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <CareSettingsModal
+          api={api}
+          backgroundHealthEnabling={false}
+          backgroundHealthDisabling={false}
+          backgroundHealthError={null}
+          backgroundHealthStatus="disabled"
+          notificationPermission="undetermined"
+          notificationRegistrationFailed={false}
+          notificationRequesting={false}
+          onClose={jest.fn()}
+          onEnableBackgroundHealth={jest.fn()}
+          onDisableBackgroundHealth={jest.fn()}
+          onRequestNotificationPermission={jest.fn()}
+          visible
+        />,
+      );
+    });
+    expect(
+      tree!.root.findByProps({ accessibilityLabel: '继续接收日常问候' }),
     ).toBeTruthy();
+
+    await act(async () => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '继续接收日常问候' })
+        .props.onPress();
+    });
+
+    expect(api.putProactiveCareSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ routineCadence: 'daily' }),
+    );
     act(() => tree!.unmount());
   });
 
@@ -112,8 +202,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onDisableBackgroundHealth={jest.fn()}
           onEnableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={jest.fn()}
           visible
         />,
@@ -157,8 +245,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onEnableBackgroundHealth={enableBackgroundHealth}
           onDisableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={requestNotificationPermission}
           visible
         />,
@@ -237,8 +323,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onDisableBackgroundHealth={disableBackgroundHealth}
           onEnableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={jest.fn()}
           visible
         />,
@@ -277,8 +361,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onDisableBackgroundHealth={disableBackgroundHealth}
           onEnableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={jest.fn()}
           visible
         />,
@@ -316,8 +398,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onDisableBackgroundHealth={jest.fn().mockResolvedValue(undefined)}
           onEnableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={jest.fn()}
           visible
         />,
@@ -357,8 +437,6 @@ describe('CareSettingsModal', () => {
           onClose={jest.fn()}
           onDisableBackgroundHealth={jest.fn().mockResolvedValue(undefined)}
           onEnableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={jest.fn()}
           onRequestNotificationPermission={jest.fn()}
           visible
         />,
@@ -368,63 +446,6 @@ describe('CareSettingsModal', () => {
     expect(
       tree!.root.findByProps({ accessibilityLabel: '关闭后台周期检查' }),
     ).toBeTruthy();
-    act(() => tree!.unmount());
-  });
-  test('deletes the account only after the password is confirmed', async () => {
-    const deleteAccount = jest.fn().mockResolvedValue(undefined);
-    const onAccountDeleted = jest.fn();
-    const api = {
-      getProactiveCareSettings: jest.fn().mockResolvedValue(settings),
-      putProactiveCareSettings: jest.fn(),
-      deleteAccount,
-    } as unknown as ApiClient;
-    let tree: ReturnType<typeof create>;
-
-    await act(async () => {
-      tree = create(
-        <CareSettingsModal
-          api={api}
-          backgroundHealthEnabling={false}
-          backgroundHealthDisabling={false}
-          backgroundHealthError={null}
-          backgroundHealthStatus="disabled"
-          notificationPermission="undetermined"
-          notificationRegistrationFailed={false}
-          notificationRequesting={false}
-          onClose={jest.fn()}
-          onEnableBackgroundHealth={jest.fn()}
-          onDisableBackgroundHealth={jest.fn()}
-          onLogout={jest.fn()}
-          onAccountDeleted={onAccountDeleted}
-          onRequestNotificationPermission={jest.fn()}
-          visible
-        />,
-      );
-    });
-
-    act(() => {
-      tree!.root.findByProps({ accessibilityLabel: '注销账号' }).props.onPress();
-    });
-    expect(deleteAccount).not.toHaveBeenCalled();
-    expect(
-      tree!.root.findByProps({ accessibilityLabel: '确认注销并删除全部数据' })
-        .props.disabled,
-    ).toBe(true);
-
-    act(() => {
-      tree!.root
-        .findByProps({ accessibilityLabel: '注销账号时输入登录密码' })
-        .props.onChangeText('correct-password');
-    });
-
-    await act(async () => {
-      tree!.root
-        .findByProps({ accessibilityLabel: '确认注销并删除全部数据' })
-        .props.onPress();
-    });
-
-    expect(deleteAccount).toHaveBeenCalledWith('correct-password');
-    expect(onAccountDeleted).toHaveBeenCalledTimes(1);
     act(() => tree!.unmount());
   });
 });

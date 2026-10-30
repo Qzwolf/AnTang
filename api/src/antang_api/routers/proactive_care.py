@@ -1,22 +1,26 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from antang_api.database import get_session, lock_user_conversation
 from antang_api.models import (
+    Conversation,
     LoginSession,
     Message,
+    MessageRole,
     ProactiveCareSettings,
     PushDelivery,
     PushDeliveryStatus,
     PushInstallation,
     PushPermissionState,
+    RoutineCareCadence,
 )
+from antang_api.psychosocial.store import read_latest_assessment
 from antang_api.routers.auth import (
     AuthenticatedSession,
     get_authenticated_session,
@@ -29,6 +33,43 @@ from antang_api.schemas.proactive_care import (
 )
 
 router = APIRouter(prefix="/api/v1/proactive-care", tags=["proactive-care"])
+
+
+async def _with_budget(
+    session: AsyncSession,
+    *,
+    care_settings: ProactiveCareSettings,
+    user_id: UUID,
+) -> ProactiveCareSettingsPayload:
+    """把设置连同「本周联系了几次 / 上限 / 是否自动暂停」一起给出去。
+
+    用户看不到次数才会觉得被打扰是随机的；看见了才觉得可控。
+    """
+
+    payload = ProactiveCareSettingsPayload.model_validate(care_settings)
+    profile = await read_latest_assessment(session, user_id)
+    payload.weekly_contact_limit = (
+        profile.weekly_contact_limit if profile is not None else None
+    )
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Message.user_id == user_id,
+            Message.role == MessageRole.ASSISTANT,
+            Conversation.kind == "care",
+            Message.created_at >= datetime.now(timezone.utc) - timedelta(days=7),
+        )
+    )
+    payload.weekly_contact_count = int(count or 0)
+    payload.auto_paused = (
+        care_settings.routine_cadence == RoutineCareCadence.DISABLED
+        and care_settings.auto_paused_at is not None
+    )
+    payload.auto_downgraded_at = care_settings.auto_downgraded_at
+    return payload
+
 
 
 @router.get("/settings", response_model=ProactiveCareSettingsPayload)
@@ -48,7 +89,11 @@ async def get_care_settings(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="主动关怀设置不存在",
         )
-    return ProactiveCareSettingsPayload.model_validate(care_settings)
+    return await _with_budget(
+        session,
+        care_settings=care_settings,
+        user_id=authenticated.user.id,
+    )
 
 
 @router.put("/settings", response_model=ProactiveCareSettingsPayload)
@@ -74,6 +119,14 @@ async def put_care_settings(
 
     previous_cadence = care_settings.routine_cadence
     care_settings.routine_cadence = request.routine_cadence
+    if (
+        request.routine_cadence != RoutineCareCadence.DISABLED
+        and previous_cadence == RoutineCareCadence.DISABLED
+    ):
+        # 用户自己把关怀重新打开：之前是我们替他暂停的，这个标记要清掉。
+        care_settings.auto_paused_at = None
+        care_settings.auto_downgraded_at = None
+        care_settings.unanswered_contacts = 0
     care_settings.plan_follow_up_enabled = request.plan_follow_up_enabled
     care_settings.health_events_enabled = request.health_events_enabled
     care_settings.timezone = request.timezone
@@ -89,7 +142,11 @@ async def put_care_settings(
         reset_existing=previous_cadence != request.routine_cadence,
     )
     await session.commit()
-    return ProactiveCareSettingsPayload.model_validate(care_settings)
+    return await _with_budget(
+        session,
+        care_settings=care_settings,
+        user_id=authenticated.user.id,
+    )
 
 
 @router.put(

@@ -100,6 +100,8 @@ async def compact_conversation(
     user_id: UUID,
     through_message_id: UUID,
     messages_to_keep: int,
+    *,
+    conversation_id: UUID | None = None,
 ) -> ConversationSummary:
     """生成并保存一份新的对话摘要快照。
 
@@ -110,14 +112,16 @@ async def compact_conversation(
     if session.new or session.dirty or session.deleted:
         raise RuntimeError("生成对话摘要前，数据库会话中不能有未提交的修改")
 
-    current_summary = await session.scalar(
-        select(ConversationSummary)
-        .where(
-            ConversationSummary.user_id == user_id,
-            ConversationSummary.through_message_id <= through_message_id,
+    summary_query = select(ConversationSummary).where(
+        ConversationSummary.user_id == user_id,
+        ConversationSummary.through_message_id <= through_message_id,
+    )
+    if conversation_id is not None:
+        summary_query = summary_query.where(
+            ConversationSummary.conversation_id == conversation_id
         )
-        .order_by(ConversationSummary.id.desc())
-        .limit(1)
+    current_summary = await session.scalar(
+        summary_query.order_by(ConversationSummary.id.desc()).limit(1)
     )
 
     message_query = select(Message).where(
@@ -125,6 +129,10 @@ async def compact_conversation(
         Message.status == MessageStatus.COMPLETED,
         Message.id <= through_message_id,
     )
+    if conversation_id is not None:
+        message_query = message_query.where(
+            Message.conversation_id == conversation_id
+        )
 
     if current_summary is not None:
         message_query = message_query.where(
@@ -187,6 +195,7 @@ async def compact_conversation(
 
     summary = ConversationSummary(
         user_id=user_id,
+        conversation_id=conversation_id,
         through_message_id=compacted_through_message_id,
         source_summary_id=source_summary_id,
         content=summary_content,

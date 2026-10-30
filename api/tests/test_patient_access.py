@@ -8,6 +8,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from antang_api.behavioral import record_behavior
 from antang_api.models import PatientAccessAudit, PersonalProfile, User, UserRole
 from antang_api.patient_access import set_user_role
 
@@ -269,6 +270,38 @@ async def test_only_the_authorized_clinician_sees_the_scale_scores(
 
     assert (await client.get(root, headers=sh)).status_code == 403
     assert (await client.get(root)).status_code == 401
+
+
+async def test_clinician_keeps_a_behavior_the_patient_deleted(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """患者删掉自己的记录只影响本人；授权医护仍看得到，并标出「患者已删除」。"""
+
+    patient, ph = await account(client, db_session)
+    clinician, ch = await account(client, db_session, UserRole.CLINICIAN)
+    root = f"/api/v1/patients/{patient['id']}/behavior-logs"
+    assert (await grant(client, ph, clinician["id"])).status_code == 201
+
+    recorded = record_behavior(
+        db_session,
+        user_id=UUID(patient["id"]),
+        kind="insulin_change",
+        count=1,
+        occurred_at=datetime.now(UTC),
+        note="自己把晚饭前的量从 8 加到 12",
+    )
+    await db_session.flush()
+    log_id = str(recorded.id)
+
+    assert (
+        await client.delete(f"/api/v1/health-profile/fear-behavior/{log_id}", headers=ph)
+    ).status_code == 204
+    assert (await client.get("/api/v1/health-profile/fear-behavior", headers=ph)).json() == []
+
+    body = (await client.get(root, headers=ch)).json()
+    assert [item["id"] for item in body["items"]] == [log_id]
+    assert body["items"][0]["deleted_by_patient"] is True
+    assert body["items"][0]["label"] == "自行调整胰岛素剂量"
 
 
 async def test_patient_list_paginates_only_authorized_patients(

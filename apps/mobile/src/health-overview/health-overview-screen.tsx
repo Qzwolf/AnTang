@@ -37,8 +37,6 @@ import {
   type PersonalValue,
 } from '../health-profile/health-profile-inputs';
 import { LiveHeartRatePanel } from '../live-heart-rate/LiveHeartRatePanel';
-import { FearBehaviorSection } from '../fear/FearBehaviorSection';
-import { PsychosocialSection } from '../psychosocial/PsychosocialSection';
 import { colors as brandColors, typefaces } from '../ui/theme';
 
 export type HealthOverviewScreenProps = {
@@ -700,9 +698,7 @@ export function HealthOverviewScreen({
 
             <LiveHeartRatePanel />
 
-            <PsychosocialSection api={api} />
-
-            <FearBehaviorSection api={api} />
+            {/* 沟通方式与行为/念头已搬到「心理」tab；健康档案只留资料、事实与设备观测。 */}
 
             <SectionHeader
               description="心率展示最近 6 小时趋势，其他项目为服务器保存的最近观测。"

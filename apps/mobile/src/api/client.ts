@@ -1,5 +1,6 @@
 import { fetch as expoFetch, type FetchRequestInit } from "expo/fetch";
 import { File } from "expo-file-system";
+import * as LegacyFileSystem from "expo-file-system/legacy";
 
 import type { TokenStore } from "../auth/token-store";
 import { consumeChatStream } from "./ndjson";
@@ -30,6 +31,7 @@ import {
   type HealthProfileChangeResult,
   type MessageHistory,
   type ProactiveCareSettings,
+  type ProactiveCareSettingsInput,
   type TokenPair,
   type User,
   type WearableImportResponse,
@@ -55,11 +57,34 @@ import {
   type BeliefEventRecord,
   parseBeliefEvents,
   parseTranscription,
+  type Conversation,
+  parseConversation,
+  parseConversations,
   type GlucoseReading,
   parseGlucoseReading,
   parseGlucoseReadings,
+  parseMealLog,
+  parseMealLogs,
+  parseMedicationLog,
+  parseMedicationLogs,
+  type MealLog,
+  type MedicationLog,
   type GlucoseSummary,
+  type GlucoseTarget,
+  type GlucoseReport,
   parseGlucoseSummary,
+  parseGlucoseTarget,
+  parseGlucoseReports,
+  parseGlucoseReport,
+  parseGlucoseReportPreview,
+  type GlucoseReportPreview,
+  type CgmImportPreview,
+  type CgmImportResult,
+  type CgmSeries,
+  type CgmSourceSystem,
+  parseCgmImportPreview,
+  parseCgmImportResult,
+  parseCgmSeries,
 } from "./types";
 
 export type FetchFunction = (
@@ -137,6 +162,50 @@ async function responseJson(response: FetchResponse): Promise<unknown> {
       `服务器返回 HTTP ${response.status}，响应内容不是有效 JSON`,
     );
   }
+}
+
+// 上传本地文件（录音、导出的 CSV）。expo 的 fetch 认这个 { bytes, name, type } 形状，
+// 手写成 Blob 反而在 RN 上拿不到内容。
+const BASE64_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** 把二进制转成 base64：写缓存文件要用，RN 没有 Buffer。 */
+function bytesToBase64(bytes: Uint8Array): string {
+  let out = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const a = bytes[index]!;
+    const b = bytes[index + 1];
+    const c = bytes[index + 2];
+    out += BASE64_ALPHABET[a >> 2];
+    out += BASE64_ALPHABET[((a & 3) << 4) | ((b ?? 0) >> 4)];
+    out += b === undefined ? "=" : BASE64_ALPHABET[((b & 15) << 2) | ((c ?? 0) >> 6)];
+    out += c === undefined ? "=" : BASE64_ALPHABET[c & 63];
+  }
+  return out;
+}
+
+function extensionForMimeType(mimeType: string): string {
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "application/pdf") return "pdf";
+  return "jpg";
+}
+
+function uploadForm(file: {
+  mimeType: string;
+  name: string;
+  uri: string;
+}): FormData {
+  const form = new FormData();
+  const body = new File(file.uri);
+  form.append(
+    "file",
+    {
+      bytes: () => body.bytes(),
+      name: file.name,
+      type: file.mimeType,
+    } as unknown as Blob,
+  );
+  return form;
 }
 
 export class ApiClient {
@@ -515,13 +584,29 @@ export class ApiClient {
     await this.mutateTokens(logoutVersion, () => this.tokenStore.clear());
   }
 
-  async getMessages(before: string | null = null): Promise<MessageHistory> {
-    const query =
-      before === null
-        ? "?limit=50"
-        : `?before=${encodeURIComponent(before)}&limit=50`;
+  async getConversations(): Promise<Conversation[]> {
+    const response = await this.authorizedFetch('/api/v1/chat/conversations');
+    if (!response.ok) throw await this.apiError(response);
+    return parseConversations(await responseJson(response));
+  }
+
+  async startConversation(): Promise<Conversation> {
+    const response = await this.authorizedFetch('/api/v1/chat/conversations', {
+      method: 'POST',
+    });
+    if (!response.ok) throw await this.apiError(response);
+    return parseConversation(await responseJson(response));
+  }
+
+  async getMessages(
+    before: string | null = null,
+    conversationId: string | null = null,
+  ): Promise<MessageHistory> {
+    const params = new URLSearchParams({ limit: '50' });
+    if (before !== null) params.set('before', before);
+    if (conversationId !== null) params.set('conversation_id', conversationId);
     const response = await this.authorizedFetch(
-      `/api/v1/chat/messages${query}`,
+      `/api/v1/chat/messages?${params.toString()}`,
     );
     if (!response.ok) throw await this.apiError(response);
     return parseMessageHistory(await responseJson(response));
@@ -535,20 +620,50 @@ export class ApiClient {
     return parseMessageHistory(await responseJson(response));
   }
 
+  /**
+   * 把已经发出去的图片/报告下到缓存，返回本地 file:// 地址。
+   *
+   * 不能只把带 Authorization 的 URL 交给 <Image>：RN 0.86 的 Image 在网络请求上
+   * 不带 headers（实测打到后端是 401），所以这里自己带 token 取字节、写成文件。
+   */
   async getChatAttachmentImageSource(attachmentId: string): Promise<{
     uri: string;
-    headers: { Authorization: string };
+  }> {
+    const { uri } = await this.saveChatAttachment(attachmentId);
+    return { uri };
+  }
+
+  /**
+   * 把一条聊天附件取到本地缓存，返回文件路径和类型。
+   *
+   * 图片和 PDF 都走这一条：附件要带 token 才能下载，所以只能自己取字节写文件，
+   * 不能把需要鉴权的 URL 直接交给 <Image> 或系统打开方式。
+   */
+  async saveChatAttachment(attachmentId: string): Promise<{
+    uri: string;
+    mimeType: string;
   }> {
     const version = this.sessionVersion;
     const tokens = await this.tokenStore.load();
     this.assertSessionVersion(version);
     if (tokens === null) return this.expireSession(version);
-    return {
-      uri: this.url(
-        `/api/v1/chat/attachments/${encodeURIComponent(attachmentId)}/content`,
-      ),
+
+    const path = `/api/v1/chat/attachments/${encodeURIComponent(attachmentId)}/content`;
+    const response = await expoFetch(this.url(path), {
       headers: { Authorization: `Bearer ${tokens.accessToken}` },
-    };
+    });
+    this.assertSessionVersion(version);
+    if (!response.ok) {
+      throw new Error(`附件下载失败：HTTP ${response.status}`);
+    }
+
+    const mimeType = response.headers.get("content-type") ?? "image/jpeg";
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const target = `${LegacyFileSystem.cacheDirectory ?? ""}chat-attachment-${attachmentId}.${extensionForMimeType(mimeType)}`;
+    await LegacyFileSystem.writeAsStringAsync(target, bytesToBase64(bytes), {
+      encoding: LegacyFileSystem.EncodingType.Base64,
+    });
+    return { uri: target, mimeType };
   }
 
   async syncPushInstallation(
@@ -597,7 +712,7 @@ export class ApiClient {
   }
 
   async putProactiveCareSettings(
-    settings: ProactiveCareSettings,
+    settings: ProactiveCareSettingsInput,
   ): Promise<ProactiveCareSettings> {
     const response = await this.authorizedFetch(
       "/api/v1/proactive-care/settings",
@@ -854,6 +969,7 @@ export class ApiClient {
     onEvent: (event: ChatStreamEvent) => void,
     signal?: AbortSignal,
     liveHeartRate?: LiveHeartRateReading | null,
+    conversationId: string | null = null,
   ): Promise<void> {
     const response = await this.authorizedFetch('/api/v1/chat/messages', {
       method: 'POST',
@@ -861,6 +977,7 @@ export class ApiClient {
         client_message_id: clientMessageId,
         content,
         attachment_id: attachmentId,
+        conversation_id: conversationId,
         live_heart_rate: liveHeartRate === undefined || liveHeartRate === null
           ? null
           : {
@@ -924,6 +1041,98 @@ export class ApiClient {
     this.assertSessionVersion(version);
     if (!response.ok) throw await this.apiError(response);
     await this.mutateTokens(version, () => this.tokenStore.clear());
+  }
+
+  async createMealLog(input: {
+    eatenAt: string;
+    mealType: "breakfast" | "lunch" | "dinner" | "snack";
+    description?: string;
+    carbsGrams?: number | null;
+  }): Promise<MealLog> {
+    const response = await this.authorizedFetch("/api/v1/health-profile/meal-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eaten_at: input.eatenAt,
+        meal_type: input.mealType,
+        description: input.description ?? "",
+        carbs_grams: input.carbsGrams ?? null,
+      }),
+    });
+    if (!response.ok) throw await this.apiError(response);
+    return parseMealLog(await responseJson(response));
+  }
+
+  async getMealLogs(days = 7, signal?: AbortSignal): Promise<MealLog[]> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/meal-logs?days=${days}`,
+      { signal },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseMealLogs(await responseJson(response));
+  }
+
+  async deleteMealLog(id: string): Promise<void> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/meal-logs/${id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+  }
+
+  /**
+   * 导出患者自己的全部记录。返回原文 + 服务器给的 content-disposition，
+   * 文件名解析、落盘与分享交给调用方，这样 API 层不依赖 expo-file-system。
+   */
+  async exportMyData(): Promise<{ contentDisposition: string | null; body: string }> {
+    const response = await this.authorizedFetch("/api/v1/health-profile/export");
+    if (!response.ok) throw await this.apiError(response);
+    return {
+      contentDisposition: response.headers.get("content-disposition"),
+      body: await response.text(),
+    };
+  }
+
+  async createMedicationLog(input: {
+    takenAt: string;
+    name: string;
+    doseText?: string;
+    kind?: "insulin" | "oral" | "other";
+    note?: string | null;
+  }): Promise<MedicationLog> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/medication-logs",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taken_at: input.takenAt,
+          name: input.name,
+          dose_text: input.doseText ?? "",
+          kind: input.kind ?? "other",
+          note: input.note ?? null,
+        }),
+      },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseMedicationLog(await responseJson(response));
+  }
+
+  async getMedicationLogs(days = 30, signal?: AbortSignal): Promise<MedicationLog[]> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/medication-logs?days=${days}`,
+      { signal },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseMedicationLogs(await responseJson(response));
+  }
+
+  async deleteMedicationLog(id: string): Promise<void> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/medication-logs/${id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw await this.apiError(response);
   }
 
   async getPsychosocialInstrument(): Promise<PsychosocialInstrument> {
@@ -1008,6 +1217,92 @@ export class ApiClient {
     if (!response.ok) throw await this.apiError(response);
   }
 
+  /**
+   * 传感器导出文件先解析、不落库：给患者看清楚多少行能用、哪些行有问题，再决定导不导。
+   */
+  async previewGlucoseImport(
+    file: { mimeType: string; name: string; uri: string },
+    sourceSystem: CgmSourceSystem = "generic",
+  ): Promise<CgmImportPreview> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/glucose-imports/preview?source_system=${sourceSystem}`,
+      { body: uploadForm(file), method: "POST" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseCgmImportPreview(await responseJson(response));
+  }
+
+  async importGlucoseCsv(
+    file: { mimeType: string; name: string; uri: string },
+    sourceSystem: CgmSourceSystem = "generic",
+  ): Promise<CgmImportResult> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/glucose-imports?source_system=${sourceSystem}`,
+      { body: uploadForm(file), method: "POST" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseCgmImportResult(await responseJson(response));
+  }
+
+  async getCgmSamples(days = 7): Promise<CgmSeries> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/cgm-samples?days=${days}`,
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseCgmSeries(await responseJson(response));
+  }
+
+  async getGlucoseReports(limit = 5): Promise<GlucoseReport[]> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/glucose-reports?limit=${limit}`,
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseGlucoseReports(await responseJson(response));
+  }
+
+  async deleteGlucoseReport(id: string): Promise<void> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/glucose-reports/${id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+  }
+
+  /**
+   * 选一份报告 PDF，先看服务端读到了什么。不落库——读错了还能改，读不到也会直说。
+   */
+  async previewGlucoseReport(file: {
+    mimeType: string;
+    name: string;
+    uri: string;
+  }): Promise<GlucoseReportPreview> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/glucose-reports/preview",
+      { body: uploadForm(file), method: "POST" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseGlucoseReportPreview(await responseJson(response));
+  }
+
+  /**
+   * 患者确认之后才写库：把**这份文件**再传一遍。
+   *
+   * 存下来的不是预览里那几个数字，而是服务端重新按模板读一遍的结果——
+   * 文件本身也留在服务端，所以详情页的「打开原报告」有得开。
+   */
+  async createGlucoseReport(file: {
+    mimeType: string;
+    name: string;
+    uri: string;
+  }): Promise<GlucoseReport> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/glucose-reports",
+      { body: uploadForm(file), method: "POST" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseGlucoseReport(await responseJson(response));
+  }
+
   async transcribeVoice(recording: {
     mimeType: string;
     name: string;
@@ -1035,6 +1330,8 @@ export class ApiClient {
     valueMgDl: number;
     measuredAt: string;
     context: string;
+    source?: string;
+    sourceDevice?: string;
     note?: string | null;
   }): Promise<GlucoseReading> {
     const response = await this.authorizedFetch(
@@ -1046,6 +1343,8 @@ export class ApiClient {
           value_mg_dl: input.valueMgDl,
           measured_at: input.measuredAt,
           context: input.context,
+          source: input.source ?? "fingerstick",
+          source_device: input.sourceDevice ?? null,
           note: input.note ?? null,
         }),
       },
@@ -1070,6 +1369,34 @@ export class ApiClient {
     );
     if (!response.ok) throw await this.apiError(response);
     return parseGlucoseSummary(await responseJson(response));
+  }
+
+  /** 患者自己的血糖目标范围；读到就用它，读不到（旧后端）就当 70–180。 */
+  async getGlucoseTarget(signal?: AbortSignal): Promise<GlucoseTarget> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/glucose-target",
+      { signal },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseGlucoseTarget(await responseJson(response));
+  }
+
+  async setGlucoseTarget(
+    lowMgDl: number,
+    highMgDl: number,
+    signal?: AbortSignal,
+  ): Promise<GlucoseTarget> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/glucose-target",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ low_mg_dl: lowMgDl, high_mg_dl: highMgDl }),
+        signal,
+      },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseGlucoseTarget(await responseJson(response));
   }
 
   async revokeGlucoseReading(id: string): Promise<void> {

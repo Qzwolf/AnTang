@@ -1126,3 +1126,115 @@ test('a questionnaire that repeats a question id is rejected instead of half sho
     'psychosocial instrument.questions 里 id 重复：same',
   );
 });
+
+describe('ApiClient glucose readings', () => {
+  const readingBody = (source: string, device: string) => ({
+    id: '019b2222-2222-7222-8222-222222222222',
+    value_mg_dl: 96,
+    measured_at: '2026-10-25T12:00:00+08:00',
+    context: 'fasting',
+    source,
+    source_device: device,
+    note: null,
+    revoked_at: null,
+    created_at: '2026-10-25T12:01:00+08:00',
+  });
+
+  test('sends the meter with a fingerstick reading', async () => {
+    const store = new MemoryTokenStore(oldTokens);
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(201, readingBody('fingerstick', 'sannuo')));
+    const client = new ApiClient(
+      'http://api.test',
+      store,
+      jest.fn(),
+      fetchMock as unknown as FetchFunction,
+    );
+
+    const reading = await client.createGlucoseReading({
+      valueMgDl: 96,
+      measuredAt: '2026-10-25T12:00:00+08:00',
+      context: 'fasting',
+      source: 'fingerstick',
+      sourceDevice: 'sannuo',
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.source_device).toBe('sannuo');
+    // 后端存了什么，前端就要读回来——否则界面「选了」等于没选。
+    expect(reading.sourceDevice).toBe('sannuo');
+  });
+
+  test('leaves the meter out when the source is a lab report', async () => {
+    const store = new MemoryTokenStore(oldTokens);
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(201, readingBody('lab', '')));
+    const client = new ApiClient(
+      'http://api.test',
+      store,
+      jest.fn(),
+      fetchMock as unknown as FetchFunction,
+    );
+
+    await client.createGlucoseReading({
+      valueMgDl: 104,
+      measuredAt: '2026-10-25T12:00:00+08:00',
+      context: 'fasting',
+      source: 'lab',
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.source_device).toBeNull();
+  });
+
+  test('reads back whether the measurement time was only a daypart', async () => {
+    const store = new MemoryTokenStore(oldTokens);
+    const fetchMock = jest.fn().mockResolvedValueOnce(
+      jsonResponse(201, {
+        ...readingBody('manual', ''),
+        measured_at: '2026-10-25T07:00:00+08:00',
+        measured_precision: 'daypart',
+      }),
+    );
+    const client = new ApiClient(
+      'http://api.test',
+      store,
+      jest.fn(),
+      fetchMock as unknown as FetchFunction,
+    );
+
+    const reading = await client.createGlucoseReading({
+      valueMgDl: 96,
+      measuredAt: '2026-10-25T07:00:00+08:00',
+      context: 'fasting',
+      source: 'manual',
+    });
+
+    // 没有这个字段，界面就会把「早上 07:00」当一个精确读数显示。
+    expect(reading.measuredPrecision).toBe('daypart');
+  });
+
+  test('treats a reading from a backend without the field as exact', async () => {
+    const store = new MemoryTokenStore(oldTokens);
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(201, readingBody('manual', '')));
+    const client = new ApiClient(
+      'http://api.test',
+      store,
+      jest.fn(),
+      fetchMock as unknown as FetchFunction,
+    );
+
+    const reading = await client.createGlucoseReading({
+      valueMgDl: 96,
+      measuredAt: '2026-10-25T12:00:00+08:00',
+      context: 'fasting',
+      source: 'manual',
+    });
+
+    expect(reading.measuredPrecision).toBe('exact');
+  });
+});

@@ -24,6 +24,7 @@ from antang_api.agents.core import CoreAgentGraph
 from antang_api.chat import (
     ActiveAgentRunError,
     ChatAttachmentError,
+    ChatConversationRequired,
     ChatRetryError,
     DuplicateClientMessageError,
     PreparedChatRun,
@@ -32,6 +33,11 @@ from antang_api.chat import (
     stream_chat_run,
 )
 from antang_api.companion_memory import CompanionMemory
+from antang_api.conversations import (
+    conversation_message_counts,
+    create_chat_conversation,
+    list_conversations,
+)
 from antang_api.database import get_session
 from antang_api.models import (
     AgentRun,
@@ -46,6 +52,8 @@ from antang_api.schemas.chat import (
     AttachmentUploadResponse,
     ChatAttachmentResponse,
     ChatMessageResponse,
+    ConversationListResponse,
+    ConversationResponse,
     LiveHeartRateReading,
     MessageHistoryResponse,
     SendMessageRequest,
@@ -215,6 +223,7 @@ async def send_message(
             client_message_id=request.client_message_id,
             content=request.content,
             attachment_id=request.attachment_id,
+            conversation_id=request.conversation_id,
         )
 
     except DuplicateClientMessageError:
@@ -237,6 +246,11 @@ async def send_message(
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={"code": "attachment_unavailable", "message": str(error)},
+        )
+    except ChatConversationRequired as error:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"code": "conversation_not_found", "message": str(error)},
         )
 
     return _stream_response(
@@ -289,11 +303,50 @@ async def retry_message(
     return _stream_response(http_request, session, user, prepared_run)
 
 
+@router.get("/conversations", response_model=ConversationListResponse)
+async def get_conversations(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> ConversationListResponse:
+    """侧边栏的对话列表，按最近一条消息倒序。"""
+
+    conversations = await list_conversations(session, user.id, limit=limit)
+    counts = await conversation_message_counts(
+        session, [conversation.id for conversation in conversations]
+    )
+    return ConversationListResponse(
+        conversations=[
+            ConversationResponse.model_validate(conversation).model_copy(
+                update={"message_count": counts.get(conversation.id, 0)}
+            )
+            for conversation in conversations
+        ]
+    )
+
+
+@router.post(
+    "/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def start_conversation(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ConversationResponse:
+    """「新的对话」：建一段空会话，之后的消息带 conversation_id 发进来。"""
+
+    conversation = await create_chat_conversation(session, user.id)
+    await session.commit()
+    return ConversationResponse.model_validate(conversation)
+
+
 @router.get("/messages", response_model=MessageHistoryResponse)
 async def get_message_history(
     user: Annotated[User, Depends(get_patient_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
     before: Annotated[UUID | None, Query()] = None,
+    conversation_id: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> MessageHistoryResponse:
     """使用消息 UUIDv7 游标读取一页历史，并按时间升序返回。"""
@@ -323,6 +376,9 @@ async def get_message_history(
         Message.user_id == user.id,
         ~superseded_core_answer,
     )
+
+    if conversation_id is not None:
+        query = query.where(Message.conversation_id == conversation_id)
 
     if before is not None:
         query = query.where(Message.id < before)

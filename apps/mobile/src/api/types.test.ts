@@ -473,6 +473,25 @@ describe('proactive care settings', () => {
       quietHoursStart: '22:00',
       quietHoursEnd: '08:00',
       healthNotificationPreviewEnabled: false,
+      // 旧后端不带打扰预算字段：按「没算过、没暂停」处理，不报错。
+      weeklyContactCount: 0,
+      weeklyContactLimit: null,
+      autoPaused: false,
+      autoDowngradedAt: null,
+    });
+    expect(
+      parseProactiveCareSettings({
+        ...response,
+        weekly_contact_count: 2,
+        weekly_contact_limit: 4,
+        auto_paused: true,
+        auto_downgraded_at: '2026-10-20T01:00:00Z',
+      }),
+    ).toMatchObject({
+      weeklyContactCount: 2,
+      weeklyContactLimit: 4,
+      autoPaused: true,
+      autoDowngradedAt: '2026-10-20T01:00:00Z',
     });
     expect(() =>
       parseProactiveCareSettings({

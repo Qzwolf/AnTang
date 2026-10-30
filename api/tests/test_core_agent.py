@@ -181,6 +181,16 @@ def test_core_prompt_does_not_turn_a_reassurance_check_into_a_reason() -> None:
     assert "“睡前再确认一次就踏实了”" in SYSTEM_PROMPT
 
 
+def test_core_prompt_records_beliefs_and_fear_behaviors_instead_of_only_noticing_them() -> None:
+    # 线上 akaa 说「我怕我会像他们一样」，回复接住了情绪，但心理那张表一条都没落。
+    # 根因是提示词从头到尾没有要求调这两个工具——模型把它当成可选的背景判断。
+    assert "心理这一侧要落库" in SYSTEM_PROMPT
+    assert "记这条信念" in SYSTEM_PROMPT
+    assert "记这次行为" in SYSTEM_PROMPT
+    assert "不要从语气里推断" in SYSTEM_PROMPT
+    assert "不要报次数" in SYSTEM_PROMPT
+
+
 def test_core_prompt_keeps_calls_and_repetition_out_of_the_reply() -> None:
     assert "调用语法绝对不能出现在正文里" in SYSTEM_PROMPT
     assert "`to=`" in SYSTEM_PROMPT

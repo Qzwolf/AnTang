@@ -45,6 +45,11 @@ class ConversationSummary(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
     )
 
+    # 摘要属于哪一段对话；不同会话的摘要不能互相沿用。
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+
     # 这份摘要已经覆盖到哪条原始消息。
     through_message_id: Mapped[UUID] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"),

@@ -331,13 +331,17 @@ async def test_web_fetch_rejects_failed_or_non_http_result() -> None:
     )
     _, fetch_tool = build_tools(client)
 
-    with pytest.raises(WebToolError, match="无法提取"):
-        await tool_coroutine(fetch_tool)(
-            url="https://example.com",
-            query="测试",
-            runtime=fetch_runtime(url="https://example.com"),
-        )
+    # 网页读不出来是网站的常态，不是内部错误：交回一句话，别让整条回复失败。
+    result = await tool_coroutine(fetch_tool)(
+        url="https://example.com",
+        query="测试",
+        runtime=fetch_runtime(url="https://example.com"),
+    )
+    assert isinstance(result, tuple)
+    content, artifact = result
 
+    assert "打不开" in content["content"]
+    assert artifact is not None
     assert client.extract.await_count == 1
 
     with pytest.raises(WebToolError, match=r"http\(s\)"):

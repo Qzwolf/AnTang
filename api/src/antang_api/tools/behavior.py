@@ -16,42 +16,94 @@ LOG_BEHAVIOR_TOOL_NAME = "log_fear_behavior"
 RECORD_BELIEF_TOOL_NAME = "record_hypoglycemia_belief"
 
 
+BehaviorKind = Annotated[
+    Literal[
+        "extra_check",
+        "night_check",
+        "comfort_meal",
+        "exercise_avoidance",
+        "insulin_hold",
+        "insulin_change",
+    ],
+    Field(
+        description=(
+            "extra_check=额外多测了一次血糖；night_check=夜间或睡前反复确认；"
+            "comfort_meal=因为担心而加餐；exercise_avoidance=因担心低血糖而放弃运动或不敢出门；"
+            "insulin_hold=因担心低血糖而少打或推迟胰岛素；"
+            "insulin_change=自己调整了胰岛素剂量（加量或减量都算），没跟医生说。"
+        )
+    ),
+]
+BehaviorCount = Annotated[
+    int,
+    Field(ge=1, le=50, description="这次提到发生了几次，只说过一次就填 1。"),
+]
+BehaviorOccurredAt = Annotated[
+    datetime | None,
+    Field(description="用户明确说出的发生时间，带时区；只说了「今天」就用当前时间。"),
+]
+BehaviorNote = Annotated[
+    str | None,
+    Field(
+        max_length=200,
+        description="用户的原话片段，用于事后核对；不要改写、不要补充用户没说的内容。",
+    ),
+]
+
+
 class FearBehaviorRequest(BaseModel):
     """用户主动说出的一次「因为怕低血糖而做（或不做）的事」。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Annotated[
-        Literal[
-            "extra_check",
-            "night_check",
-            "comfort_meal",
-            "exercise_avoidance",
-            "insulin_hold",
-        ],
-        Field(
-            description=(
-                "extra_check=额外多测了一次血糖；night_check=夜间或睡前反复确认；"
-                "comfort_meal=因为担心而加餐；exercise_avoidance=因担心低血糖而放弃运动或不敢出门；"
-                "insulin_hold=因担心低血糖而少打或推迟胰岛素。"
-            )
-        ),
-    ]
-    count: Annotated[
-        int,
-        Field(ge=1, le=50, description="这次提到发生了几次，只说过一次就填 1。"),
-    ] = 1
-    occurred_at: Annotated[
-        datetime | None,
-        Field(description="用户明确说出的发生时间，带时区；只说了「今天」就用当前时间。"),
-    ] = None
-    note: Annotated[
-        str | None,
-        Field(
-            max_length=200,
-            description="用户的原话片段，用于事后核对；不要改写、不要补充用户没说的内容。",
-        ),
-    ] = None
+    kind: BehaviorKind
+    count: BehaviorCount = 1
+    occurred_at: BehaviorOccurredAt = None
+    note: BehaviorNote = None
+
+
+BeliefCode = Annotated[
+    Literal[
+        "hypo_causes_death",
+        "hypo_causes_coma",
+        "hypo_is_losing_control",
+        "hypo_reveals_weakness",
+        "hypo_is_my_fault",
+        "hypo_always_repeats",
+        "hypo_cannot_be_detected",
+        "hypo_blocks_normal_life",
+    ],
+    Field(description="只能从这八个节点里选最贴近的一个，不要自创。"),
+]
+BeliefQuote = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=300,
+        description="逐字复制用户表达这条信念的原话，一个字都不要改。",
+    ),
+]
+BeliefOccurrence = Annotated[
+    Literal["mentioned", "reframed", "denied"],
+    Field(
+        description=(
+            "mentioned=用户新说出这条信念；reframed=用户在这轮里对它有了松动或新的看法；"
+            "denied=用户明确否认了这条信念。"
+        )
+    ),
+]
+BeliefTriggerContext = Annotated[
+    str | None,
+    Field(max_length=200, description="当时的情境，例如「今晚一个人睡」「开会前」。"),
+]
+BeliefIntensity = Annotated[
+    int | None,
+    Field(
+        ge=0,
+        le=100,
+        description="对话中能看出的当时恐惧强度 0–100；没有依据就留空，不要猜。",
+    ),
+]
 
 
 class BeliefRequest(BaseModel):
@@ -59,48 +111,11 @@ class BeliefRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    belief_code: Annotated[
-        Literal[
-            "hypo_causes_death",
-            "hypo_causes_coma",
-            "hypo_is_losing_control",
-            "hypo_reveals_weakness",
-            "hypo_is_my_fault",
-            "hypo_always_repeats",
-            "hypo_cannot_be_detected",
-            "hypo_blocks_normal_life",
-        ],
-        Field(description="只能从这八个节点里选最贴近的一个，不要自创。"),
-    ]
-    quote: Annotated[
-        str,
-        Field(
-            min_length=1,
-            max_length=300,
-            description="逐字复制用户表达这条信念的原话，一个字都不要改。",
-        ),
-    ]
-    occurrence: Annotated[
-        Literal["mentioned", "reframed", "denied"],
-        Field(
-            description=(
-                "mentioned=用户新说出这条信念；reframed=用户在这轮里对它有了松动或新的看法；"
-                "denied=用户明确否认了这条信念。"
-            )
-        ),
-    ] = "mentioned"
-    trigger_context: Annotated[
-        str | None,
-        Field(max_length=200, description="当时的情境，例如「今晚一个人睡」「开会前」。"),
-    ] = None
-    fear_intensity: Annotated[
-        int | None,
-        Field(
-            ge=0,
-            le=100,
-            description="对话中能看出的当时恐惧强度 0–100；没有依据就留空，不要猜。",
-        ),
-    ] = None
+    belief_code: BeliefCode
+    quote: BeliefQuote
+    occurrence: BeliefOccurrence = "mentioned"
+    trigger_context: BeliefTriggerContext = None
+    fear_intensity: BeliefIntensity = None
 
 
 async def _trigger_message_id(
@@ -127,17 +142,27 @@ def build_behavior_tools(
 
     @tool(LOG_BEHAVIOR_TOOL_NAME)
     async def log_fear_behavior(
-        request: FearBehaviorRequest,
         runtime: ToolRuntime[AgentContext],
+        kind: BehaviorKind,
+        count: BehaviorCount = 1,
+        occurred_at: BehaviorOccurredAt = None,
+        note: BehaviorNote = None,
     ) -> dict[str, object]:
         """记录用户亲口说出的、因担心低血糖而发生的一次行为。
 
-        只在用户这一轮确实说了具体行为时调用（例如「刚才又多测了两次」
-        「怕夜里低血糖所以睡前吃了饼干」「因为怕低血糖没去跑步」）。
+        用户这一轮说了具体行为时就要记（例如「刚才又多测了两次」「怕夜里低血糖所以
+        睡前吃了饼干」「因为怕低血糖没去跑步」「自己把胰岛素减了一个单位」），
+        只在回复里回应、不调工具，这条行为就没有留下来。
         不能从语气或推断里编造行为，也不能把建议说成用户做过的事。
         一轮里同一行为只记一次，次数放进 count。
         """
 
+        request = FearBehaviorRequest(
+            kind=kind,
+            count=count,
+            occurred_at=occurred_at,
+            note=note,
+        )
         if request.note is None:
             raise ValueError("记录行为必须附上用户原话片段")
 
@@ -162,16 +187,29 @@ def build_behavior_tools(
 
     @tool(RECORD_BELIEF_TOOL_NAME)
     async def record_hypoglycemia_belief(
-        request: BeliefRequest,
         runtime: ToolRuntime[AgentContext],
+        belief_code: BeliefCode,
+        quote: BeliefQuote,
+        occurrence: BeliefOccurrence = "mentioned",
+        trigger_context: BeliefTriggerContext = None,
+        fear_intensity: BeliefIntensity = None,
     ) -> dict[str, object]:
         """记录用户表露的一条低血糖灾难化信念。
 
-        只在用户原话里真的出现这类信念时调用，quote 必须逐字复制，
-        不能复述、不能合并两句。一轮里同一条信念出现多次也只记一次。
+        只要用户这一轮的话里出现了这类信念（会死、会昏迷、一低就失控、发现不了低血糖、
+        永远会再来、是自己没做好、怕被看成软弱、因为怕低血糖不敢过正常生活），就要调这个
+        工具把它落库；只在回复里接住情绪、不调工具，等于这条信念没有留下来。
+        `quote` 必须逐字复制，不能复述、不能合并两句。一轮里同一条信念出现多次也只记一次。
         如果用户只是陈述一般知识或转述别人，不要记成用户自己的信念。
         """
 
+        request = BeliefRequest(
+            belief_code=belief_code,
+            quote=quote,
+            occurrence=occurrence,
+            trigger_context=trigger_context,
+            fear_intensity=fear_intensity,
+        )
         async with sessions() as session:
             message_id = await _trigger_message_id(session, runtime)
             event = record_belief(

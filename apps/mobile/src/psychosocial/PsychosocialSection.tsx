@@ -54,6 +54,7 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
   );
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 默认收起：7 道题直接摊开会把「我的」页拉得很长，先给一句摘要和「开始填写」。
   const [open, setOpen] = useState(false);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [goldScore, setGoldScore] = useState<number | null>(null);
@@ -158,6 +159,12 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
       ) : open && instrument !== null ? (
         <View>
           <Text style={styles.description}>{instrument.instructions}</Text>
+          {profile === null ? null : (
+            <Text style={styles.metaText}>
+              上次填写：{formatDate(profile.assessedAt)} · 糖糖现在每周主动联系你约{' '}
+              {profile.weeklyContactLimit} 次
+            </Text>
+          )}
           {questions.map((question, index) => (
             <View key={question.id} style={styles.question}>
               <Text style={styles.questionText}>

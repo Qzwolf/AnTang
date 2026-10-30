@@ -22,7 +22,7 @@ function updateState(overrides: Partial<UpdateCheckState> = {}): UpdateCheckStat
 }
 
 async function renderScreen(update: UpdateCheckState, handlers: Partial<Record<
-  'onClose' | 'onLogout' | 'onDeleteAccount' | 'onOpenCare',
+  'onClose' | 'onOpenCare',
   () => void
 >> = {}): Promise<ReactTestRenderer> {
   let renderer: ReactTestRenderer | null = null;
@@ -30,11 +30,8 @@ async function renderScreen(update: UpdateCheckState, handlers: Partial<Record<
     renderer = create(
       <SettingsScreen
         onClose={handlers.onClose ?? (() => undefined)}
-        onLogout={handlers.onLogout ?? (() => undefined)}
-        onDeleteAccount={handlers.onDeleteAccount ?? (() => undefined)}
         onOpenCare={handlers.onOpenCare ?? (() => undefined)}
         update={update}
-        username="akaa"
       />,
     );
   });
@@ -85,25 +82,25 @@ describe('SettingsScreen', () => {
     expect(renderedText(renderer)).toContain('已是最新版本');
   });
 
+  it('keeps the account rows out of settings', async () => {
+    const renderer = await renderScreen(updateState());
+    const text = renderedText(renderer);
+
+    // 退出登录与注销账号现在只在「我的」页底部，设置页不再出现，避免同一批入口两处维护。
+    expect(text).not.toContain('退出登录');
+    expect(text).not.toContain('注销账号');
+  });
+
   it('wires the rows to the actions the screen is given', async () => {
     const onClose = jest.fn();
-    const onLogout = jest.fn();
-    const onDeleteAccount = jest.fn();
     const onOpenCare = jest.fn();
     const update = updateState();
-    const renderer = await renderScreen(update, {
-      onClose,
-      onLogout,
-      onDeleteAccount,
-      onOpenCare,
-    });
+    const renderer = await renderScreen(update, { onClose, onOpenCare });
 
     act(() => {
       renderer.root
         .findByProps({ accessibilityLabel: '打开主动关怀设置' })
         .props.onPress();
-      renderer.root.findByProps({ accessibilityLabel: '退出登录' }).props.onPress();
-      renderer.root.findByProps({ accessibilityLabel: '注销账号' }).props.onPress();
       renderer.root
         .findByProps({ accessibilityLabel: '自动检查更新' })
         .props.onValueChange(false);
@@ -111,8 +108,6 @@ describe('SettingsScreen', () => {
     });
 
     expect(onOpenCare).toHaveBeenCalled();
-    expect(onLogout).toHaveBeenCalled();
-    expect(onDeleteAccount).toHaveBeenCalled();
     expect(update.setAutoCheck).toHaveBeenCalledWith(false);
     expect(onClose).toHaveBeenCalled();
   });

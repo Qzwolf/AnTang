@@ -8,7 +8,15 @@ from antang_api.models.behavior import (
     FearBehaviorLog,
     HypoglycemiaBeliefEvent,
 )
-from antang_api.models.glucose import GLUCOSE_CONTEXTS, GLUCOSE_SOURCES, GlucoseReading
+from antang_api.models.glucose import (
+    GLUCOSE_CONTEXTS,
+    GLUCOSE_SOURCES,
+    GLUCOSE_SOURCE_SYSTEMS,
+    CgmSample,
+    GlucoseImport,
+    GlucoseReading,
+    GlucoseReport,
+)
 from antang_api.models.chat import (
     AgentRun,
     AgentRunStatus,
@@ -20,6 +28,7 @@ from antang_api.models.chat import (
 )
 from antang_api.models.companion_memory import CompanionMemoryCursor
 from antang_api.models.context import ConversationSummary
+from antang_api.models.conversation import CONVERSATION_KINDS, Conversation
 from antang_api.models.health_profile import (
     FactAssertion,
     FactTemporalStatus,
@@ -35,6 +44,12 @@ from antang_api.models.health_profile import (
     ProfileTargetType,
 )
 from antang_api.models.knowledge import KnowledgeChunk, KnowledgeDocument
+from antang_api.models.nutrition import (
+    MEAL_TYPES,
+    MEDICATION_KINDS,
+    MealLog,
+    MedicationLog,
+)
 from antang_api.models.psychosocial import PsychosocialAssessment
 from antang_api.models.proactive_care import (
     CarePlan,
@@ -81,7 +96,11 @@ __all__ = [
     "FearBehaviorLog",
     "GLUCOSE_CONTEXTS",
     "GLUCOSE_SOURCES",
+    "GLUCOSE_SOURCE_SYSTEMS",
+    "CgmSample",
+    "GlucoseImport",
     "GlucoseReading",
+    "GlucoseReport",
     "HYPOGLYCEMIA_BELIEFS",
     "HypoglycemiaBeliefEvent",
     "LoginSession",
@@ -97,6 +116,8 @@ __all__ = [
     "PatientAccessGrant",
     "PatientAccessAudit",
     "ConversationSummary",
+    "CONVERSATION_KINDS",
+    "Conversation",
     "CompanionMemoryCursor",
     "CarePlan",
     "CarePlanStatus",
@@ -108,6 +129,10 @@ __all__ = [
     "HealthProfileChange",
     "KnowledgeChunk",
     "KnowledgeDocument",
+    "MealLog",
+    "MedicationLog",
+    "MEAL_TYPES",
+    "MEDICATION_KINDS",
     "PersonalProfile",
     "PersonalProfileField",
     "ProfileChangeMode",

@@ -366,13 +366,11 @@ export function MessageAttachmentCard({
   attachment: ChatAttachment;
   getImageSource: (attachmentId: string) => Promise<{
     uri: string;
-    headers: { Authorization: string };
   }>;
 }) {
   const isImage = attachment.mimeType.startsWith('image/');
   const [remoteImageSource, setRemoteImageSource] = useState<{
     uri: string;
-    headers: { Authorization: string };
   } | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
 

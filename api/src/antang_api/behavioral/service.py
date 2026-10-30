@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from antang_api.models import (
@@ -129,23 +129,26 @@ async def read_behavior_logs(
     days: int = 28,
     now: datetime | None = None,
     limit: int = 200,
+    include_deleted: bool = False,
 ) -> list[FearBehaviorLog]:
     """按时间倒序列出窗口内的行为记录，供 App 逐条展示与撤回。
 
     汇总卡片只给次数，删不了；要让人自己删，必须先把「哪一条」摆出来。
+    `include_deleted` 只给医护端用：患者删掉的那条对本人不再出现，
+    但已同步给医护的记录要留着，复诊时还能核对，并标注「患者已删除」。
     """
 
     window_end = now or datetime.now(UTC)
     window_start = window_end - timedelta(days=days)
+    statement = select(FearBehaviorLog).where(
+        FearBehaviorLog.user_id == user_id,
+        FearBehaviorLog.occurred_at >= window_start,
+        FearBehaviorLog.occurred_at <= window_end,
+    )
+    if not include_deleted:
+        statement = statement.where(FearBehaviorLog.deleted_at.is_(None))
     rows = await session.execute(
-        select(FearBehaviorLog)
-        .where(
-            FearBehaviorLog.user_id == user_id,
-            FearBehaviorLog.occurred_at >= window_start,
-            FearBehaviorLog.occurred_at <= window_end,
-        )
-        .order_by(FearBehaviorLog.occurred_at.desc())
-        .limit(limit)
+        statement.order_by(FearBehaviorLog.occurred_at.desc()).limit(limit)
     )
     return list(rows.scalars())
 
@@ -181,18 +184,22 @@ async def delete_behavior_log(
     user_id: UUID,
     log_id: UUID,
 ) -> bool:
-    """患者自己撤回一条行为记录：真删，不留软删除标记。
+    """患者自己撤回一条行为记录：只从本人界面上删掉（软删除）。
 
-    「夜里起来查了六次血糖」这种记录属于患者最敏感的数据，AGENTS.md 要求删干净，
-    所以不学血糖读数的 revoked_at 软撤回。只能删自己的：user_id 一起进条件。
+    为什么不做真删：这条记录可能已经被医护端看到（比如自行调药），
+    而「患者单方面抹掉、医生那边也消失」这种设计会让复诊核对失去依据。
+    所以这里打 deleted_at：患者的列表、统计、上下文都不再包含它，
+    医护端查询仍能看到，并标注「患者已删除」。只能删自己的。
     """
 
     deleted_id = await session.scalar(
-        delete(FearBehaviorLog)
+        update(FearBehaviorLog)
         .where(
             FearBehaviorLog.id == log_id,
             FearBehaviorLog.user_id == user_id,
+            FearBehaviorLog.deleted_at.is_(None),
         )
+        .values(deleted_at=datetime.now(UTC))
         .returning(FearBehaviorLog.id)
     )
     return deleted_id is not None
@@ -236,6 +243,9 @@ async def read_fear_summary(
                 FearBehaviorLog.user_id == user_id,
                 FearBehaviorLog.occurred_at >= window_start,
                 FearBehaviorLog.occurred_at <= window_end,
+                # 患者删掉的那条不再进本人的统计与上下文；
+                # 医护端自己读库时另走 include_deleted。
+                FearBehaviorLog.deleted_at.is_(None),
             )
         )
     ).scalars()
@@ -327,6 +337,7 @@ _BEHAVIOR_KIND_LABELS = {
     "comfort_meal": "因为担心而加餐",
     "exercise_avoidance": "运动回避",
     "insulin_hold": "自行减少胰岛素",
+    "insulin_change": "自行调整胰岛素剂量",
 }
 
 # 对外暴露同一份词表，App 的「我的记录」与汇总卡片因此不会出现两套叫法。

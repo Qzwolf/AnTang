@@ -37,6 +37,66 @@ HISTORICAL_WEB_RESULT_NOTICE = (
     "当前回答若要引用其中的事实，必须在本次运行中重新调用 web_fetch。"
 )
 
+# 文字层够厚的 PDF（指南、论文、说明书）直接读文字，比整份 base64 便宜也更准；
+# 文字层太少的多半是图表型报告（比如 CGM 评估报告），还是把原文件交给模型看图。
+PDF_TEXT_LAYER_MIN_CHARS = 2000
+PDF_TEXT_LAYER_MAX_CHARS = 16000
+PDF_TEXT_LAYER_NOTICE = (
+    "【以下是这份 PDF 里能读出来的文字，最多前 16000 字。"
+    "表格、曲线和版式不在其中；需要看图时请让患者把那一页发成截图。】"
+)
+
+# 图表型报告（CGM 评估报告那种）文字层很薄，整份 base64 又贵又容易读歪，
+# 而模板解析恰好只认这类报告——那就把解析结果当既成事实给模型。
+REPORT_FACTS_NOTICE = (
+    "【这份 PDF 已经按报告模板解析过，下面的数字是程序从文件里读出来的，不是猜的。】"
+)
+REPORT_FACTS_TAIL = (
+    "要记这份报告时直接调用记录工具，存下来的以这些数字为准：不要再自己读一遍，"
+    "也不要改动这些数字。曲线和版式不在其中，患者要看图就请他把那一页发成截图。"
+)
+
+
+def _report_facts_part(attachment: MessageAttachment) -> dict[str, object] | None:
+    """报告模板认得出来时，把字段拼成文本块；认不出来返回 None。"""
+
+    from antang_api.health_profile.report_parse import (
+        UnreadableReport,
+        parse_report_pdf,
+        render_parsed_facts,
+    )
+
+    try:
+        parsed = parse_report_pdf(attachment.data)
+    except UnreadableReport:
+        return None
+    facts = render_parsed_facts(parsed)
+    return {
+        "type": "text",
+        "text": f"{REPORT_FACTS_NOTICE}{facts}。{REPORT_FACTS_TAIL}",
+    }
+
+
+def _pdf_text_part(attachment: MessageAttachment) -> dict[str, object] | None:
+    """把 PDF 的文字层抽成文本块；抽不动或文字太少就返回 None。"""
+
+    # 延迟导入：context 包很底层，别让 pypdf 在每次进程启动时都跟着加载。
+    from antang_api.health_profile.report_parse import (
+        UnreadableReport,
+        extract_pdf_text,
+    )
+
+    try:
+        text = extract_pdf_text(attachment.data).strip()
+    except UnreadableReport:
+        return None
+    if len(text) < PDF_TEXT_LAYER_MIN_CHARS:
+        return None
+    return {
+        "type": "text",
+        "text": f"{PDF_TEXT_LAYER_NOTICE}\n\n{text[:PDF_TEXT_LAYER_MAX_CHARS]}",
+    }
+
 
 @dataclass(frozen=True)
 class ChatContext:
@@ -56,26 +116,36 @@ def to_model_message(
     match message.role:
         case MessageRole.USER:
             if attachment is not None:
-                encoded = base64.b64encode(attachment.data).decode("ascii")
-                file_part: dict[str, object]
+                part: dict[str, object] | None = None
                 if attachment.mime_type == "application/pdf":
-                    file_part = {
-                        "type": "file",
-                        "file": {
-                            "filename": attachment.filename,
-                            "file_data": f"data:{attachment.mime_type};base64,{encoded}",
-                        },
-                    }
-                else:
-                    file_part = {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{attachment.mime_type};base64,{encoded}",
-                        },
-                    }
+                    # 先试文字层：读得动就不必把整份 PDF 编码进请求。
+                    part = _pdf_text_part(attachment)
+                    if part is None:
+                        part = _report_facts_part(attachment)
+                if part is None:
+                    encoded = base64.b64encode(attachment.data).decode("ascii")
+                    if attachment.mime_type == "application/pdf":
+                        part = {
+                            "type": "file",
+                            "file": {
+                                "filename": attachment.filename,
+                                "file_data": (
+                                    f"data:{attachment.mime_type};base64,{encoded}"
+                                ),
+                            },
+                        }
+                    else:
+                        part = {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    f"data:{attachment.mime_type};base64,{encoded}"
+                                ),
+                            },
+                        }
                 return HumanMessage(
                     content=[
-                        file_part,
+                        part,
                         {"type": "text", "text": message.content},
                     ]
                 )
@@ -253,19 +323,27 @@ async def _load_completed_tool_messages(
 
 
 async def build_chat_context(
-    session: AsyncSession, user_id: UUID, through_message_id: UUID
+    session: AsyncSession,
+    user_id: UUID,
+    through_message_id: UUID,
+    conversation_id: UUID | None = None,
 ) -> ChatContext:
-    """读取最新摘要，以及摘要之后、当前消息之前的完整对话。"""
+    """读取最新摘要，以及摘要之后、当前消息之前的完整对话。
+
+    传了 conversation_id 就只看这一段对话；不传保持旧行为（整条流）。
+    """
 
     # 取出最新的摘要
-    summary = await session.scalar(
-        select(ConversationSummary)
-        .where(
-            ConversationSummary.user_id == user_id,
-            ConversationSummary.through_message_id <= through_message_id,
+    summary_query = select(ConversationSummary).where(
+        ConversationSummary.user_id == user_id,
+        ConversationSummary.through_message_id <= through_message_id,
+    )
+    if conversation_id is not None:
+        summary_query = summary_query.where(
+            ConversationSummary.conversation_id == conversation_id
         )
-        .order_by(ConversationSummary.id.desc())
-        .limit(1)
+    summary = await session.scalar(
+        summary_query.order_by(ConversationSummary.id.desc()).limit(1)
     )
 
     # 该用户所有「已完成、且不晚于当前消息的消息」 的查询语句
@@ -274,6 +352,10 @@ async def build_chat_context(
         Message.status == MessageStatus.COMPLETED,
         Message.id <= through_message_id,
     )
+    if conversation_id is not None:
+        message_query = message_query.where(
+            Message.conversation_id == conversation_id
+        )
 
     # 只要摘要覆盖之后的消息
     if summary is not None:

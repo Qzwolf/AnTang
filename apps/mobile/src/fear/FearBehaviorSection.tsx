@@ -38,6 +38,7 @@ export const BEHAVIOR_LABELS: Record<string, string> = {
   comfort_meal: '因为担心而加餐',
   exercise_avoidance: '回避运动',
   insulin_hold: '自行减少胰岛素',
+  insulin_change: '自行调整胰岛素剂量',
 };
 
 const BEHAVIOR_ORDER = [
@@ -46,6 +47,7 @@ const BEHAVIOR_ORDER = [
   'comfort_meal',
   'exercise_avoidance',
   'insulin_hold',
+  'insulin_change',
 ];
 
 export type FearBehaviorSectionProps = {
@@ -57,11 +59,22 @@ export type FearBehaviorSectionProps = {
     | 'deleteFearBehaviorLog'
     | 'deleteBeliefEvent'
   >;
+  /**
+   * 同一份数据按需求拆成三块：
+   * - `all`：行为标签 + 反复出现的念头 + 可删记录（默认，保持旧行为）
+   * - `beliefs`：只出「反复出现的念头」，放在沟通方式自评下面
+   * - `records`：只出逐条记录与撤回
+   * 拆开是因为两件事对患者的含义不同：念头是理解，记录是管理权。
+   */
+  mode?: 'all' | 'beliefs' | 'records';
 };
 
 type PendingDelete = { kind: 'behavior' | 'belief'; id: string };
 
-export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
+export function FearBehaviorSection({
+  api,
+  mode = 'all',
+}: FearBehaviorSectionProps) {
   const [summary, setSummary] = useState<FearSummary | null>(null);
   const [logs, setLogs] = useState<FearBehaviorLog[]>([]);
   const [events, setEvents] = useState<BeliefEventRecord[]>([]);
@@ -130,9 +143,17 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
   return (
     <View style={styles.card}>
       <View style={styles.kickerPill}>
-        <Text style={styles.kicker}>行为记录</Text>
+        <Text style={styles.kicker}>
+          {mode === 'records' ? '记录' : mode === 'beliefs' ? '念头' : '行为记录'}
+        </Text>
       </View>
-      <Text style={styles.title}>你最近在做什么</Text>
+      <Text style={styles.title}>
+        {mode === 'records'
+          ? '我的记录与撤回'
+          : mode === 'beliefs'
+            ? '反复出现的念头'
+            : '你最近在做什么'}
+      </Text>
 
       {loading ? (
         <View style={styles.loadingRow}>
@@ -141,28 +162,36 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
         </View>
       ) : loadError !== null ? (
         <Text style={styles.errorText}>{loadError}</Text>
-      ) : summary === null ? null : isEmpty(summary) ? (
+      ) : mode === 'records' || summary === null ? null : isEmpty(summary) ? (
         <Text style={styles.description}>
           还没有记录。聊天时顺口提到的「刚才又测了一次」「今晚不敢跑步」这类事，糖糖会记在这里，下次就记得了。
         </Text>
       ) : (
         <View>
-          <Text style={styles.description}>
-            {mentionSentence(summary)}这些是聊天里顺口提到的，不是量表，也不打分。
-          </Text>
+          {mode === 'all' ? (
+            <>
+              <Text style={styles.description}>
+                {mentionSentence(summary)}这些是聊天里顺口提到的，不是量表，也不打分。
+              </Text>
 
-          {/* 行为改成可换行的小标签：原来是「标签 ─ 次数」两列，次数撤掉后
-              右侧会空出一大块，看着像排版坏了。 */}
-          <View style={styles.chips}>
-            {BEHAVIOR_ORDER.filter(
-              (kind) => (summary.behaviorCounts[kind] ?? 0) > 0,
-            ).map((kind) => (
-              <View key={kind} style={styles.chip}>
-                <View style={styles.rowDot} />
-                <Text style={styles.rowLabel}>{behaviorLabel(kind)}</Text>
+              {/* 行为改成可换行的小标签：原来是「标签 ─ 次数」两列，次数撤掉后
+                  右侧会空出一大块，看着像排版坏了。 */}
+              <View style={styles.chips}>
+                {BEHAVIOR_ORDER.filter(
+                  (kind) => (summary.behaviorCounts[kind] ?? 0) > 0,
+                ).map((kind) => (
+                  <View key={kind} style={styles.chip}>
+                    <View style={styles.rowDot} />
+                    <Text style={styles.rowLabel}>{behaviorLabel(kind)}</Text>
+                  </View>
+                ))}
               </View>
-            ))}
-          </View>
+            </>
+          ) : (
+            <Text style={styles.description}>
+              这些是你在聊天里说过的想法，原话留着。不想看可以收起，想删可以到下面「我的记录与撤回」里删。
+            </Text>
+          )}
 
           {summary.beliefs.length > 0 ? (
             <View style={styles.beliefBlock}>
@@ -194,14 +223,17 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
         <Text style={styles.errorText}>{actionError}</Text>
       ) : null}
 
-      {logs.length > 0 || events.length > 0 ? (
+      {mode !== 'beliefs' &&
+      !loading &&
+      loadError === null &&
+      (logs.length > 0 || events.length > 0) ? (
         <View style={styles.recordsBlock}>
           <View style={styles.sectionHead}>
             <View style={[styles.sectionBar, styles.sectionBarRecords]} />
             <Text style={styles.subtitle}>记录</Text>
           </View>
           <Text style={styles.description}>
-            每一条都是聊天里你自己说的。删掉就真的没了，所以先确认一次。
+            每一条都是聊天里你自己说的。删掉就从你的记录里消失，所以先确认一次。
           </Text>
           {logs.map((log) => (
             <RecordRow
@@ -236,9 +268,15 @@ export function FearBehaviorSection({ api }: FearBehaviorSectionProps) {
         </View>
       ) : null}
 
-      <Text style={styles.noteText}>
-        这些是聊天里你自己说的事，不是量表分数，也不用来给你打分。不想要的那条，上面可以直接删。
-      </Text>
+      {mode === 'beliefs' ? null : mode === 'records' ? (
+        <Text style={styles.noteText}>
+          这里只列你自己说过的事，不是量表分数。删掉就从你的记录里消失，删之前会再问一次。
+        </Text>
+      ) : (
+        <Text style={styles.noteText}>
+          这些是聊天里你自己说的事，不是量表分数，也不用来给你打分。不想要的那条，上面可以直接删。
+        </Text>
+      )}
     </View>
   );
 }

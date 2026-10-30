@@ -2,11 +2,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from antang_api.export import build_patient_export
 from antang_api.behavioral import (
     BEHAVIOR_KIND_LABELS,
     delete_behavior_log,
@@ -16,16 +25,43 @@ from antang_api.behavioral import (
     read_fear_summary,
 )
 from antang_api.database import get_session
+from antang_api.health_profile.cgm_import import CgmParseError, parse_cgm_csv
+from antang_api.health_profile.cgm_store import read_samples, store_import
+from antang_api.schemas.cgm import (
+    CgmImportPreviewResponse,
+    CgmImportResponse,
+    CgmSamplePreview,
+    CgmSampleResponse,
+    CgmSeriesResponse,
+    CgmSourceSystem,
+)
 from antang_api.health_profile.glucose import (
+    delete_glucose_report,
+    glucose_targets,
     list_glucose_readings,
+    list_glucose_reports,
     record_glucose_reading,
+    record_glucose_report,
     revoke_glucose_reading,
+    set_glucose_targets,
     summarize_glucose,
 )
+from antang_api.health_profile.report_parse import UnreadableReport, parse_report_pdf
 from antang_api.schemas.glucose import (
     GlucoseReadingCreate,
     GlucoseReadingResponse,
+    GlucoseReportPreview,
+    GlucoseReportResponse,
+    GlucoseReportsResponse,
     GlucoseSummaryResponse,
+    GlucoseTargetResponse,
+    GlucoseTargetUpdate,
+)
+from antang_api.schemas.nutrition import (
+    MealLogRequest,
+    MealLogResponse,
+    MedicationLogRequest,
+    MedicationLogResponse,
 )
 from antang_api.health_profile.errors import (
     HealthProfileChangedError,
@@ -63,6 +99,10 @@ from antang_api.psychosocial.report import patient_assessment_response
 from antang_api.models import (
     HYPOGLYCEMIA_BELIEFS,
     HealthProfileChange,
+    MealLog,
+    MedicationLog,
+    MessageAttachment,
+    MessageAttachmentKind,
     ProfileChangeMode,
     ProfileChangeStatus,
     PsychosocialAssessment,
@@ -595,6 +635,8 @@ async def create_glucose_reading(
         user_id=user.id,
         value_mg_dl=payload.value_mg_dl,
         measured_at=payload.measured_at,
+        source=payload.source,
+        source_device=payload.source_device or "",
         context=payload.context,
         note=payload.note,
     )
@@ -614,6 +656,39 @@ async def get_glucose_readings(
     return [GlucoseReadingResponse.model_validate(item) for item in readings]
 
 
+@router.get("/glucose-reports", response_model=GlucoseReportsResponse)
+async def get_glucose_reports(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> GlucoseReportsResponse:
+    """患者存过的报告速览：对话里读过一份报告，这里就有一条。"""
+
+    reports = await list_glucose_reports(session, user_id=user.id, limit=limit)
+    return GlucoseReportsResponse(
+        items=[GlucoseReportResponse.model_validate(item) for item in reports]
+    )
+
+
+@router.delete(
+    "/glucose-reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def remove_glucose_report(
+    report_id: UUID,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """删掉一份报告速览：患者不认这条，界面上就不该再留着。"""
+
+    deleted = await delete_glucose_report(
+        session, user_id=user.id, report_id=report_id
+    )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="没有找到这份报告速览。"
+        )
+
+
 @router.get("/glucose-readings/summary", response_model=GlucoseSummaryResponse)
 async def get_glucose_summary(
     user: Annotated[User, Depends(get_patient_user)],
@@ -624,6 +699,40 @@ async def get_glucose_summary(
 
     summary = await summarize_glucose(session, user_id=user.id, days=days)
     return GlucoseSummaryResponse.model_validate(summary)
+
+
+@router.get("/glucose-target", response_model=GlucoseTargetResponse)
+async def get_glucose_target(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> GlucoseTargetResponse:
+    """患者自己的血糖目标范围；没设过就是默认的 70–180 mg/dL。"""
+
+    low, high = await glucose_targets(session, user_id=user.id)
+    return GlucoseTargetResponse(low_mg_dl=low, high_mg_dl=high)
+
+
+@router.put("/glucose-target", response_model=GlucoseTargetResponse)
+async def put_glucose_target(
+    payload: GlucoseTargetUpdate,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> GlucoseTargetResponse:
+    """按患者（或他的医生）给的数字改目标范围，别替他决定用哪个标准。"""
+
+    try:
+        low, high = await set_glucose_targets(
+            session,
+            user_id=user.id,
+            low_mg_dl=payload.low_mg_dl,
+            high_mg_dl=payload.high_mg_dl,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    await session.commit()
+    return GlucoseTargetResponse(low_mg_dl=low, high_mg_dl=high)
 
 
 @router.delete("/glucose-readings/{reading_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -697,7 +806,11 @@ async def delete_fear_behavior_log(
     user: Annotated[User, Depends(get_patient_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
-    """患者撤回一条「因为怕低血糖而做的事」记录：真删，不留痕。"""
+    """患者撤回一条「因为怕低血糖而做的事」记录：从本人的界面与统计里消失。
+
+    只做软删除（打 deleted_at）。已经同步给医护的记录不跟着消失，
+    否则「自行调药」这类需要复诊核对的事，患者单方面就能抹掉。
+    """
 
     deleted = await delete_behavior_log(session, user_id=user.id, log_id=log_id)
     if not deleted:
@@ -721,3 +834,386 @@ async def delete_hypoglycemia_belief_event(
             status_code=status.HTTP_404_NOT_FOUND, detail="没有这条记录"
         )
     await session.commit()
+
+
+MAX_CGM_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+def _decode_upload(upload: UploadFile, data: bytes) -> None:
+    if len(data) == 0:
+        raise HTTPException(status_code=422, detail="这个文件是空的")
+    if len(data) > MAX_CGM_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_CGM_UPLOAD_BYTES // (1024 * 1024)} MB，请先导出一个月内的数据",
+        )
+    name = (upload.filename or "").lower()
+    if not (name.endswith(".csv") or name.endswith(".txt")):
+        raise HTTPException(
+            status_code=415,
+            detail="这里收的是 CSV 导出文件。PDF 报告请用「导入报告 PDF」，",
+        )
+
+
+async def _read_upload(upload: UploadFile) -> bytes:
+    data = await upload.read()
+    _decode_upload(upload, data)
+    return data
+
+
+@router.post("/glucose-imports/preview", response_model=CgmImportPreviewResponse)
+async def preview_glucose_import(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+    source_system: Annotated[CgmSourceSystem, Query()] = "generic",
+) -> CgmImportPreviewResponse:
+    """先解析、不落库：把能用的行和可疑行都摆出来，让患者确认后再导入。"""
+
+    del user
+    data = await _read_upload(file)
+    try:
+        result = parse_cgm_csv(data)
+    except CgmParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return CgmImportPreviewResponse(
+        source_system=source_system,
+        file_name=file.filename or "upload.csv",
+        unit=result.unit,
+        total_rows=len(result.samples) + len(result.problems),
+        usable_rows=len(result.samples),
+        problems=result.problems[:20],
+        first_at=result.samples[0].recorded_at if result.samples else None,
+        last_at=result.samples[-1].recorded_at if result.samples else None,
+        samples=[
+            CgmSamplePreview(
+                recorded_at=sample.recorded_at,
+                value_mg_dl=sample.value_mg_dl,
+                trend=sample.trend,
+            )
+            for sample in result.samples[:10]
+        ],
+    )
+
+
+@router.post(
+    "/glucose-imports",
+    response_model=CgmImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_glucose_series(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    source_system: Annotated[CgmSourceSystem, Query()] = "generic",
+) -> CgmImportResponse:
+    """确认导入：整批写库，同一份文件重复导入不会重复入库。"""
+
+    data = await _read_upload(file)
+    try:
+        result = parse_cgm_csv(data)
+    except CgmParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not result.samples:
+        raise HTTPException(
+            status_code=422,
+            detail="这个文件里没有一行能用的血糖数据，请检查导出格式。",
+        )
+
+    record = await store_import(
+        session,
+        user_id=user.id,
+        source_system=source_system,
+        file_name=file.filename or "upload.csv",
+        samples=result.samples,
+        skipped_count=result.skipped_rows,
+    )
+    await session.commit()
+    return CgmImportResponse.model_validate(record)
+
+
+@router.get("/cgm-samples", response_model=CgmSeriesResponse)
+async def get_cgm_samples(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> CgmSeriesResponse:
+    """按时间正序返回导入的 CGM 序列，供曲线展示。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    samples = await read_samples(session, user_id=user.id, since=since)
+    return CgmSeriesResponse(
+        days=days,
+        count=len(samples),
+        samples=[CgmSampleResponse.model_validate(item) for item in samples],
+    )
+
+
+MAX_REPORT_PDF_BYTES = 10 * 1024 * 1024
+# 报告上一定有这些字段里的大部分；读不到的要告诉患者「没读到」，不能显示成 0。
+_METRIC_LABELS = {
+    "mean_mmol": "平均葡萄糖",
+    "sd_mmol": "标准差",
+    "cv_percent": "变异系数",
+    "ehba1c_percent": "预估糖化",
+    "normal_percent": "正常分档",
+    "low_percent": "低分档",
+    "very_low_percent": "很低分档",
+    "high_percent": "高分档",
+    "very_high_percent": "很高分档",
+}
+
+
+def _read_report_pdf(upload: UploadFile, data: bytes) -> None:
+    if len(data) == 0:
+        raise HTTPException(status_code=422, detail="这个文件是空的")
+    if len(data) > MAX_REPORT_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_REPORT_PDF_BYTES // (1024 * 1024)} MB，"
+            "请只选报告那一份 PDF，不要把整套资料一起发。",
+        )
+    name = (upload.filename or "").lower()
+    if not name.endswith(".pdf"):
+        detail = "这里只收 PDF。CSV 导出文件请用「导入传感器数据」。"
+        raise HTTPException(status_code=415, detail=detail)
+
+
+@router.post("/glucose-reports/preview", response_model=GlucoseReportPreview)
+async def preview_glucose_report(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+) -> GlucoseReportPreview:
+    """先解析、不落库：把读到的字段摆出来，患者确认了才存。"""
+
+    del user
+    data = await file.read()
+    _read_report_pdf(file, data)
+    try:
+        parsed = parse_report_pdf(data)
+    except UnreadableReport as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    metrics = parsed.metrics()
+    return GlucoseReportPreview(
+        file_name=file.filename or "report.pdf",
+        period_start=parsed.period_start,
+        period_end=parsed.period_end,
+        report_generated_at=parsed.generated_at,
+        device=parsed.device,
+        device_serial=parsed.device_serial,
+        hospital=parsed.hospital,
+        mean_mmol=parsed.mean_mmol,
+        sd_mmol=parsed.sd_mmol,
+        cv_percent=parsed.cv_percent,
+        ehba1c_percent=parsed.ehba1c_percent,
+        normal_percent=parsed.normal_percent,
+        low_percent=parsed.low_percent,
+        very_low_percent=parsed.very_low_percent,
+        high_percent=parsed.high_percent,
+        very_high_percent=parsed.very_high_percent,
+        missing=[
+            label for key, label in _METRIC_LABELS.items() if metrics[key] is None
+        ],
+    )
+
+
+@router.post(
+    "/glucose-reports",
+    response_model=GlucoseReportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_glucose_report(
+    file: Annotated[UploadFile, File()],
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> GlucoseReportResponse:
+    """确认导入：把这份 PDF 留下来，再按模板把指标存成一份报告速览。
+
+    文件要吃两遍：**存下来的不是预览时那几个数，而是重新按模板读一遍的结果**，
+    这样客户端改不了数，也和「从对话发进来」那条路走同一份解析。
+    原文件存成一条没有 message 的附件记录，详情页的「打开原报告」因此也能用。
+    """
+
+    data = await file.read()
+    _read_report_pdf(file, data)
+    try:
+        parsed = parse_report_pdf(data)
+    except UnreadableReport as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    attachment = MessageAttachment(
+        user_id=user.id,
+        # 这份文件不是从对话发来的：没有 message，只挂在这份报告速览上。
+        message_id=None,
+        kind=MessageAttachmentKind.REPORT,
+        filename=(file.filename or "report.pdf").strip()[:255] or "report.pdf",
+        mime_type="application/pdf",
+        size_bytes=len(data),
+        data=data,
+    )
+    session.add(attachment)
+    await session.flush()
+
+    report = await record_glucose_report(
+        session,
+        user_id=user.id,
+        period_start=parsed.period_start,
+        period_end=parsed.period_end,
+        device=parsed.device,
+        device_serial=parsed.device_serial,
+        report_generated_at=parsed.generated_at,
+        mean_mmol=parsed.mean_mmol,
+        sd_mmol=parsed.sd_mmol,
+        cv_percent=parsed.cv_percent,
+        ehba1c_percent=parsed.ehba1c_percent,
+        normal_percent=parsed.normal_percent,
+        low_percent=parsed.low_percent,
+        very_low_percent=parsed.very_low_percent,
+        high_percent=parsed.high_percent,
+        very_high_percent=parsed.very_high_percent,
+        source_attachment_id=attachment.id,
+    )
+    await session.commit()
+    return GlucoseReportResponse.model_validate(report)
+
+
+@router.post(
+    "/meal-logs",
+    response_model=MealLogResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_meal_log(
+    payload: MealLogRequest,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MealLogResponse:
+    """记一顿饭。碳水是估计值，允许为空，也允许患者自己改。"""
+
+    meal = MealLog(
+        user_id=user.id,
+        eaten_at=payload.eaten_at,
+        meal_type=payload.meal_type,
+        description=payload.description.strip(),
+        carbs_grams=payload.carbs_grams,
+    )
+    session.add(meal)
+    await session.commit()
+    await session.refresh(meal)
+    return MealLogResponse.model_validate(meal)
+
+
+@router.get("/meal-logs", response_model=list[MealLogResponse])
+async def list_meal_logs(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> list[MealLogResponse]:
+    """按时间倒序返回最近的饮食记录，供记录页展示。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.scalars(
+            select(MealLog)
+            .where(MealLog.user_id == user.id, MealLog.eaten_at >= since)
+            .order_by(MealLog.eaten_at.desc())
+        )
+    ).all()
+    return [MealLogResponse.model_validate(row) for row in rows]
+
+
+@router.delete("/meal-logs/{meal_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meal_log(
+    meal_id: UUID,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """患者自己删掉一条饮食记录（硬删除，无法恢复）。"""
+
+    meal = await session.get(MealLog, meal_id)
+    if meal is None or meal.user_id != user.id:
+        raise HTTPException(status_code=404, detail="没有这条记录")
+    await session.delete(meal)
+    await session.commit()
+
+
+@router.post(
+    "/medication-logs",
+    response_model=MedicationLogResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_medication_log(
+    payload: MedicationLogRequest,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MedicationLogResponse:
+    """记一次用药。只记录患者填的内容，不计算剂量、不给建议。"""
+
+    log = MedicationLog(
+        user_id=user.id,
+        taken_at=payload.taken_at,
+        name=payload.name.strip(),
+        dose_text=payload.dose_text.strip(),
+        kind=payload.kind,
+        note=(payload.note or "").strip() or None,
+    )
+    session.add(log)
+    await session.commit()
+    await session.refresh(log)
+    return MedicationLogResponse.model_validate(log)
+
+
+@router.get("/medication-logs", response_model=list[MedicationLogResponse])
+async def list_medication_logs(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=180)] = 30,
+) -> list[MedicationLogResponse]:
+    """按时间倒序返回最近的用药记录。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.scalars(
+            select(MedicationLog)
+            .where(MedicationLog.user_id == user.id, MedicationLog.taken_at >= since)
+            .order_by(MedicationLog.taken_at.desc())
+        )
+    ).all()
+    return [MedicationLogResponse.model_validate(row) for row in rows]
+
+
+@router.delete("/medication-logs/{log_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_medication_log(
+    log_id: UUID,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """患者自己删掉一条用药记录（硬删除，无法恢复）。"""
+
+    log = await session.get(MedicationLog, log_id)
+    if log is None or log.user_id != user.id:
+        raise HTTPException(status_code=404, detail="没有这条记录")
+    await session.delete(log)
+    await session.commit()
+
+
+@router.get("/export")
+async def export_patient_data(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> JSONResponse:
+    """把患者自己的数据打包成一份 JSON 下载。
+
+    为什么不返回 pydantic 模型：这份东西的字段会随版本演进，用 `dict` + 版本号
+    比一层层 `model_validate` 更适合「导出后长期可读」。filename 带上日期，方便
+    患者自己存放多份。
+    """
+
+    payload = await build_patient_export(session, user)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Content-Disposition": f'attachment; filename="antang-export-{stamp}.json"',
+            "Cache-Control": "no-store",
+        },
+    )

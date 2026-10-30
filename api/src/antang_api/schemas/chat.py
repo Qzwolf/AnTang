@@ -39,10 +39,12 @@ class LiveHeartRateReading(BaseModel):
 class SendMessageRequest(BaseModel):
     """手机发送一条用户消息时提交的数据。"""
 
-    # 由手机生成。同一次发送即使因网络问题重试，也继续使用同一个 ID。
+    # 手机生成。同一次发送即使因网络问题重试，也继续使用同一个 ID。
     client_message_id: UUID
     content: MessageContent
     attachment_id: UUID | None = None
+    # 发到哪一段对话；老客户端不带，就接到最近一段。
+    conversation_id: UUID | None = None
     # 手机此刻正在接收的实时心率广播读数；没有实时监测时为 None。
     live_heart_rate: LiveHeartRateReading | None = None
 
@@ -184,3 +186,21 @@ class MessageHistoryResponse(BaseModel):
 
     messages: list[ChatMessageResponse]
     next_before: UUID | None
+
+
+class ConversationResponse(BaseModel):
+    """侧边栏里的一段对话。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    kind: str
+    title: str
+    created_at: datetime
+    last_message_at: datetime | None
+    # 侧边栏靠它藏掉「点了新的对话却一句没说」的空段。
+    message_count: int = 0
+
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationResponse]

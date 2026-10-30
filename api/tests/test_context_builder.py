@@ -1,6 +1,7 @@
 import json
 from uuid import uuid4
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -137,6 +138,159 @@ async def test_build_chat_context_includes_pdf_for_the_model(
         "data:application/pdf;base64,"
     )
     assert content[1] == {"type": "text", "text": "请解读这份报告"}
+
+
+async def _pdf_message(db_session: AsyncSession, data: bytes) -> tuple[User, Message]:
+    username = f"pdf_text_{uuid4().hex[:12]}"
+    user = User(
+        username=username,
+        username_normalized=username,
+        password_hash="test-only-password-hash",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    message = Message(
+        user_id=user.id,
+        role=MessageRole.USER,
+        status=MessageStatus.COMPLETED,
+        content="这份指南怎么说的",
+    )
+    db_session.add(message)
+    await db_session.flush()
+    db_session.add(
+        MessageAttachment(
+            user_id=user.id,
+            message_id=message.id,
+            kind=MessageAttachmentKind.REPORT,
+            filename="指南.pdf",
+            mime_type="application/pdf",
+            size_bytes=len(data),
+            data=data,
+        )
+    )
+    await db_session.flush()
+    return user, message
+
+
+async def test_a_text_rich_pdf_goes_in_as_text_not_as_base64(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文字层够厚的 PDF 只发文字，省掉整份文件的 base64。"""
+
+    monkeypatch.setattr(
+        "antang_api.health_profile.report_parse.extract_pdf_text",
+        lambda _data: "目标范围内时间应不低于百分之七十。" * 200,
+    )
+    user, message = await _pdf_message(db_session, b"%PDF-1.4 fake")
+
+    context = await build_chat_context(db_session, user.id, message.id)
+
+    content = context.messages[-1].content
+    assert isinstance(content, list)
+    first = content[0]
+    assert isinstance(first, dict)
+    assert first["type"] == "text"
+    text = first["text"]
+    assert isinstance(text, str)
+    assert "文字" in text
+    assert "目标范围内时间应不低于百分之七十" in text
+    assert content[1] == {"type": "text", "text": "这份指南怎么说的"}
+
+
+async def test_a_chart_heavy_pdf_still_goes_in_whole(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文字层太薄的报告（CGM 评估报告那类）还是把原文件交给模型看图。"""
+
+    monkeypatch.setattr(
+        "antang_api.health_profile.report_parse.extract_pdf_text",
+        lambda _data: "监测时间:2025/07/28-2025/07/31",
+    )
+    user, message = await _pdf_message(db_session, b"%PDF-1.4 fake")
+
+    context = await build_chat_context(db_session, user.id, message.id)
+
+    content = context.messages[-1].content
+    assert isinstance(content, list)
+    first = content[0]
+    assert isinstance(first, dict)
+    assert first["type"] == "file"
+    assert first["file"]["filename"] == "指南.pdf"
+
+
+async def test_a_chart_heavy_report_goes_in_as_parsed_facts(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模板认得的报告直接把解析结果当事实给模型：别让它自己去数图上的数字。"""
+
+    from datetime import date
+
+    from antang_api.health_profile.report_parse import ParsedReport
+
+    parsed = ParsedReport(
+        period_start=date(2025, 7, 28),
+        period_end=date(2025, 7, 31),
+        generated_at=date(2025, 7, 31),
+        device="硅基动感Pro",
+        device_serial="LT2410FE3P",
+        hospital="示例医院",
+        mean_mmol=5.81,
+        normal_percent=99.6,
+        low_percent=0.4,
+    )
+    monkeypatch.setattr(
+        "antang_api.health_profile.report_parse.extract_pdf_text",
+        lambda _data: "监测时间:2025/07/28-2025/07/31",
+    )
+    monkeypatch.setattr(
+        "antang_api.health_profile.report_parse.parse_report_pdf",
+        lambda _data: parsed,
+    )
+    user, message = await _pdf_message(db_session, b"%PDF-1.4 fake")
+
+    context = await build_chat_context(db_session, user.id, message.id)
+
+    content = context.messages[-1].content
+    assert isinstance(content, list)
+    first = content[0]
+    assert isinstance(first, dict)
+    assert first["type"] == "text"
+    text = first["text"]
+    assert isinstance(text, str)
+    assert "按报告模板解析" in text
+    assert "平均葡萄糖 5.81mmol/L" in text
+    assert "正常档 99.6%" in text
+    assert "base64" not in text
+
+
+async def test_a_pdf_without_a_text_layer_still_goes_in_whole(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """扫描件抽不出文字时不能因此把文件从上下文里弄丢。"""
+
+    def _explode(_data: bytes) -> str:
+        from antang_api.health_profile.report_parse import UnreadableReport
+
+        raise UnreadableReport("这个 PDF 里没有文字层")
+
+    monkeypatch.setattr(
+        "antang_api.health_profile.report_parse.extract_pdf_text",
+        _explode,
+    )
+    user, message = await _pdf_message(db_session, b"%PDF-1.4 fake")
+
+    context = await build_chat_context(db_session, user.id, message.id)
+
+    content = context.messages[-1].content
+    assert isinstance(content, list)
+    first = content[0]
+    assert isinstance(first, dict)
+    assert first["type"] == "file"
+    assert first["file"]["file_data"].startswith("data:application/pdf;base64,")
 
 
 async def test_build_chat_context_keeps_proactive_opening_before_short_reply(

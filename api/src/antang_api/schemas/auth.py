@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -77,6 +78,8 @@ class UserResponse(BaseModel):
     role: UserRole
     full_name: str | None = None
     application_status: ApplicationStatus | None = None
+    # 「我的」页要显示「注册于 …」，但只有日期，不掺行为数据。
+    created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

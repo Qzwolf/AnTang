@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from antang_api.database import get_session
+from antang_api.behavioral import BEHAVIOR_KIND_LABELS, read_behavior_logs
 from antang_api.health_profile.wearable_dashboard import read_wearable_dashboard
 from antang_api.models import PatientAccessAudit, PatientAccessGrant, User, UserRole
 from antang_api.patient_access import (
@@ -20,6 +21,8 @@ from antang_api.psychosocial.report import clinician_assessment_response
 from antang_api.routers.health_profile import read_health_profile
 from antang_api.schemas.auth import UserResponse
 from antang_api.schemas.health_profile import (
+    ClinicianBehaviorLogResponse,
+    ClinicianBehaviorLogsResponse,
     ClinicianPsychosocialResponse,
     HealthProfileResponse,
     WearableDashboardResponse,
@@ -242,3 +245,46 @@ async def patient_dashboard(
     result = await read_wearable_dashboard(session, user_id=patient_id)
     await session.commit()
     return result
+
+
+@router.get(
+    "/patients/{patient_id}/behavior-logs",
+    response_model=ClinicianBehaviorLogsResponse,
+)
+async def patient_behavior_logs(
+    patient_id: UUID,
+    user: Clinician,
+    session: Database,
+    response: Response,
+    days: Annotated[int, Query(ge=1, le=365)] = 90,
+) -> ClinicianBehaviorLogsResponse:
+    """医护端读行为记录：包含患者已经删掉的那些，并标出「患者已删除」。
+
+    患者删一条只是让它从自己的界面上消失（软删除），医护端这一份不跟着消失——
+    「自行调药」这类事如果患者单方面就能抹掉，复诊核对就失去了依据。
+    医护只能读：这里没有删除入口，也不能替患者改。
+    """
+
+    response.headers["Cache-Control"] = "no-store"
+    await check_patient_access(
+        session, clinician=user, patient_id=patient_id, resource="health_profile"
+    )
+    rows = await read_behavior_logs(
+        session, user_id=patient_id, days=days, include_deleted=True
+    )
+    await session.commit()
+    return ClinicianBehaviorLogsResponse(
+        days=days,
+        items=[
+            ClinicianBehaviorLogResponse(
+                id=row.id,
+                kind=row.kind,
+                label=BEHAVIOR_KIND_LABELS.get(row.kind, row.kind),
+                count=row.count,
+                note=row.note,
+                occurred_at=row.occurred_at,
+                deleted_by_patient=row.deleted_at is not None,
+            )
+            for row in rows
+        ],
+    )

@@ -4,6 +4,8 @@ export type User = {
   role: "patient" | "clinician" | "researcher";
   fullName?: string | null;
   applicationStatus?: ApplicationStatus | null;
+  /** 注册时刻（ISO 8601）。旧后端没有这个字段，「我的」页就不显示注册天数。 */
+  createdAt?: string | null;
 };
 
 export type ApplicationStatus = "pending" | "approved" | "rejected";
@@ -111,7 +113,20 @@ export type ProactiveCareSettings = {
   quietHoursStart: string;
   quietHoursEnd: string;
   healthNotificationPreviewEnabled: boolean;
+  /** 本周已经主动联系过几次（服务端按自然周算）。 */
+  weeklyContactCount: number;
+  /** 量表给的每周上限；没做过量表时为空。 */
+  weeklyContactLimit: number | null;
+  /** 因为连续没回应，系统替用户暂停了日常问候。 */
+  autoPaused: boolean;
+  autoDowngradedAt: string | null;
 };
+
+/** 用户可以改的部分；次数与自动暂停是服务端算出来的，提交时不带。 */
+export type ProactiveCareSettingsInput = Omit<
+  ProactiveCareSettings,
+  "weeklyContactCount" | "weeklyContactLimit" | "autoPaused" | "autoDowngradedAt"
+>;
 
 export type HealthProfileCard = {
   id: string;
@@ -689,6 +704,10 @@ export function parseUser(value: unknown): User {
               ? null
               : parseApplicationStatus(data.application_status),
         }),
+    // 旧后端不返回 created_at，缺字段就不显示注册天数，而不是把整次登录判成格式错误。
+    ...(typeof data.created_at === "string"
+      ? { createdAt: data.created_at }
+      : {}),
   };
 }
 
@@ -858,6 +877,40 @@ export function parseMessageHistory(value: unknown): MessageHistory {
   };
 }
 
+export type Conversation = {
+  id: string;
+  title: string;
+  createdAt: string;
+  lastMessageAt: string | null;
+  /** 这段对话里已有几条消息。旧后端不给这个字段，按 0 算。 */
+  messageCount: number;
+};
+
+export function parseConversation(value: unknown): Conversation {
+  const data = objectValue(value, "conversation");
+  return {
+    id: uuidValue(data.id, "conversation.id"),
+    title: stringValue(data.title, "conversation.title"),
+    createdAt: zonedDateTimeValue(data.created_at, "conversation.created_at"),
+    lastMessageAt:
+      data.last_message_at === null
+        ? null
+        : zonedDateTimeValue(data.last_message_at, "conversation.last_message_at"),
+    messageCount:
+      typeof data.message_count === "number" && data.message_count > 0
+        ? data.message_count
+        : 0,
+  };
+}
+
+export function parseConversations(value: unknown): Conversation[] {
+  const data = objectValue(value, "conversations");
+  if (!Array.isArray(data.conversations)) {
+    throw new Error("conversations.conversations 必须是数组");
+  }
+  return data.conversations.map(parseConversation);
+}
+
 export function parseProactiveCareNotificationData(
   value: unknown,
 ): ProactiveCareNotificationData {
@@ -907,6 +960,27 @@ export function parseProactiveCareSettings(
       data.health_notification_preview_enabled,
       "care settings.health_notification_preview_enabled",
     ),
+    // 老后端没有这几个字段：按「没算过、没暂停」处理，不报错。
+    weeklyContactCount:
+      data.weekly_contact_count === undefined
+        ? 0
+        : integerValue(
+            data.weekly_contact_count,
+            "care settings.weekly_contact_count",
+          ),
+    weeklyContactLimit:
+      data.weekly_contact_limit === null ||
+      data.weekly_contact_limit === undefined
+        ? null
+        : integerValue(
+            data.weekly_contact_limit,
+            "care settings.weekly_contact_limit",
+          ),
+    autoPaused: data.auto_paused === true,
+    autoDowngradedAt:
+      typeof data.auto_downgraded_at === "string"
+        ? data.auto_downgraded_at
+        : null,
   };
 }
 
@@ -2074,6 +2148,14 @@ export type GlucoseReading = {
   measuredAt: string;
   context: string;
   source: string;
+  /** 指尖血用的哪台血糖仪（roche/abbott/sannuo/other），没选是空串。 */
+  sourceDevice: string;
+  /**
+   * 测量时间的精度。`daypart` 表示患者只说得出「早上 / 晚上」这类时段，
+   * 时间是该时段的代表时刻，界面上必须写成「早上（大概）」，
+   * 不能让它冒充一个精确到分钟的读数。
+   */
+  measuredPrecision: "exact" | "daypart";
   note: string | null;
   revokedAt: string | null;
   createdAt: string;
@@ -2085,7 +2167,23 @@ export type GlucoseSummary = {
   averageMgDl: number | null;
   minimumMgDl: number | null;
   maximumMgDl: number | null;
-  below70Count: number;
+  /** 目标范围是患者自己设的，所以统计跟着一起回来：界面不用再写死 3.9 / 10.0。 */
+  targetLowMgDl: number;
+  targetHighMgDl: number;
+  belowTargetCount: number;
+  inTargetCount: number;
+  aboveTargetCount: number;
+};
+
+/** 患者自己的血糖目标范围（mg/dL）。 */
+export type GlucoseTarget = {
+  lowMgDl: number;
+  highMgDl: number;
+};
+
+export const DEFAULT_GLUCOSE_TARGET: GlucoseTarget = {
+  lowMgDl: 70,
+  highMgDl: 180,
 };
 
 function glucoseObject(value: unknown): Record<string, unknown> {
@@ -2125,6 +2223,11 @@ export function parseGlucoseReading(value: unknown): GlucoseReading {
     measuredAt: glucoseString(data, "measured_at"),
     context: glucoseString(data, "context"),
     source: glucoseString(data, "source"),
+    // 旧后端没有这个字段时给空串，不报错。
+    sourceDevice: typeof data.source_device === "string" ? data.source_device : "",
+    // 旧后端没有这个字段：按精确处理，和它的行为一致。
+    measuredPrecision:
+      data.measured_precision === "daypart" ? "daypart" : "exact",
     note: typeof note === "string" ? note : null,
     revokedAt: typeof revoked === "string" ? revoked : null,
     createdAt: glucoseString(data, "created_at"),
@@ -2144,6 +2247,395 @@ export function parseGlucoseSummary(value: unknown): GlucoseSummary {
     averageMgDl: glucoseNullableNumber(data, "average_mg_dl"),
     minimumMgDl: glucoseNullableNumber(data, "minimum_mg_dl"),
     maximumMgDl: glucoseNullableNumber(data, "maximum_mg_dl"),
-    below70Count: glucoseNumber(data, "below_70_count"),
+    targetLowMgDl:
+      glucoseNullableNumber(data, "target_low_mg_dl") ??
+      DEFAULT_GLUCOSE_TARGET.lowMgDl,
+    targetHighMgDl:
+      glucoseNullableNumber(data, "target_high_mg_dl") ??
+      DEFAULT_GLUCOSE_TARGET.highMgDl,
+    belowTargetCount: glucoseNumber(data, "below_target_count"),
+    inTargetCount: glucoseNumber(data, "in_target_count"),
+    aboveTargetCount: glucoseNumber(data, "above_target_count"),
   };
+}
+
+/** 目标范围接口：旧后端没有这个接口，读不到就当默认的 70–180。 */
+export function parseGlucoseTarget(value: unknown): GlucoseTarget {
+  const data = glucoseObject(value);
+  return {
+    lowMgDl: glucoseNullableNumber(data, "low_mg_dl") ?? DEFAULT_GLUCOSE_TARGET.lowMgDl,
+    highMgDl:
+      glucoseNullableNumber(data, "high_mg_dl") ?? DEFAULT_GLUCOSE_TARGET.highMgDl,
+  };
+}
+
+export type MealType = "breakfast" | "lunch" | "dinner" | "snack";
+
+export type MedicationKind = "insulin" | "oral" | "other";
+
+export type MealLog = {
+  id: string;
+  eatenAt: string;
+  mealType: MealType;
+  description: string;
+  carbsGrams: number | null;
+  createdAt: string;
+};
+
+export type MedicationLog = {
+  id: string;
+  takenAt: string;
+  name: string;
+  doseText: string;
+  kind: MedicationKind;
+  note: string | null;
+  createdAt: string;
+};
+
+const MEAL_TYPES: MealType[] = ["breakfast", "lunch", "dinner", "snack"];
+const MEDICATION_KINDS: MedicationKind[] = ["insulin", "oral", "other"];
+
+function nutritionObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("记录格式不正确");
+  }
+  return value as Record<string, unknown>;
+}
+
+function nutritionString(data: Record<string, unknown>, key: string): string {
+  const value = data[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`记录缺少 ${key}`);
+  }
+  return value;
+}
+
+function nutritionTime(data: Record<string, unknown>, key: string): string {
+  const value = data[key];
+  if (typeof value !== "string") throw new Error(`记录缺少 ${key}`);
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) throw new Error(`记录里的 ${key} 不是时间`);
+  return value;
+}
+
+function nutritionCars(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("碳水估计值不是数字");
+  }
+  return value;
+}
+
+export function parseMealLog(value: unknown): MealLog {
+  const data = nutritionObject(value);
+  const mealType = data.meal_type;
+  if (typeof mealType !== "string" || !MEAL_TYPES.includes(mealType as MealType)) {
+    throw new Error("这顿算哪一餐不认识");
+  }
+  return {
+    id: nutritionString(data, "id"),
+    eatenAt: nutritionTime(data, "eaten_at"),
+    mealType: mealType as MealType,
+    description: typeof data.description === "string" ? data.description : "",
+    carbsGrams: nutritionCars(data.carbs_grams),
+    createdAt: nutritionTime(data, "created_at"),
+  };
+}
+
+export function parseMealLogs(value: unknown): MealLog[] {
+  if (!Array.isArray(value)) throw new Error("饮食记录格式不正确");
+  return value.map(parseMealLog);
+}
+
+export function parseMedicationLog(value: unknown): MedicationLog {
+  const data = nutritionObject(value);
+  const kind = data.kind;
+  if (typeof kind !== "string" || !MEDICATION_KINDS.includes(kind as MedicationKind)) {
+    throw new Error("这种用药方式不认识");
+  }
+  return {
+    id: nutritionString(data, "id"),
+    takenAt: nutritionTime(data, "taken_at"),
+    name: nutritionString(data, "name"),
+    doseText: typeof data.dose_text === "string" ? data.dose_text : "",
+    kind: kind as MedicationKind,
+    note: typeof data.note === "string" ? data.note : null,
+    createdAt: nutritionTime(data, "created_at"),
+  };
+}
+
+export function parseMedicationLogs(value: unknown): MedicationLog[] {
+  if (!Array.isArray(value)) throw new Error("用药记录格式不正确");
+  return value.map(parseMedicationLog);
+}
+
+export type CgmSourceSystem =
+  | "sibionics"
+  | "nightscout"
+  | "libre"
+  | "dexcom"
+  | "generic";
+
+export const CGM_SOURCE_LABELS: Record<CgmSourceSystem, string> = {
+  sibionics: "硅基",
+  nightscout: "Nightscout",
+  libre: "雅培",
+  dexcom: "德康",
+  generic: "其他",
+};
+
+export type CgmSample = {
+  recordedAt: string;
+  valueMgDl: number;
+  trend: string | null;
+  sourceSystem?: string;
+};
+
+export type CgmImportPreview = {
+  sourceSystem: string;
+  fileName: string;
+  unit: string;
+  totalRows: number;
+  usableRows: number;
+  problems: string[];
+  firstAt: string | null;
+  lastAt: string | null;
+  samples: CgmSample[];
+};
+
+export type CgmImportResult = {
+  id: string;
+  sourceSystem: string;
+  fileName: string;
+  parsedCount: number;
+  insertedCount: number;
+  skippedCount: number;
+  createdAt: string;
+};
+
+export type CgmSeries = {
+  days: number;
+  count: number;
+  samples: CgmSample[];
+};
+
+function cgmObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("传感器数据格式不正确");
+  }
+  return value as Record<string, unknown>;
+}
+
+function cgmString(data: Record<string, unknown>, key: string): string {
+  const value = data[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`传感器数据缺少 ${key}`);
+  }
+  return value;
+}
+
+function cgmNumber(data: Record<string, unknown>, key: string): number {
+  const value = data[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`传感器数据缺少 ${key}`);
+  }
+  return value;
+}
+
+function cgmTimeOrNull(data: Record<string, unknown>, key: string): string | null {
+  const value = data[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error(`传感器数据里的 ${key} 不是时间`);
+  }
+  return value;
+}
+
+function cgmStringList(data: Record<string, unknown>, key: string): string[] {
+  const value = data[key];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error(`传感器数据的 ${key} 不是列表`);
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+export function parseCgmSamples(value: unknown): CgmSample[] {
+  if (!Array.isArray(value)) throw new Error("传感器数据列表格式不正确");
+  return value.map((item) => {
+    const data = cgmObject(item);
+    return {
+      recordedAt: cgmString(data, "recorded_at"),
+      valueMgDl: cgmNumber(data, "value_mg_dl"),
+      trend: typeof data.trend === "string" ? data.trend : null,
+      sourceSystem:
+        typeof data.source_system === "string" ? data.source_system : undefined,
+    };
+  });
+}
+
+export function parseCgmImportPreview(value: unknown): CgmImportPreview {
+  const data = cgmObject(value);
+  return {
+    sourceSystem: cgmString(data, "source_system"),
+    fileName: cgmString(data, "file_name"),
+    unit: cgmString(data, "unit"),
+    totalRows: cgmNumber(data, "total_rows"),
+    usableRows: cgmNumber(data, "usable_rows"),
+    problems: cgmStringList(data, "problems"),
+    firstAt: cgmTimeOrNull(data, "first_at"),
+    lastAt: cgmTimeOrNull(data, "last_at"),
+    samples: parseCgmSamples(data.samples ?? []),
+  };
+}
+
+export function parseCgmImportResult(value: unknown): CgmImportResult {
+  const data = cgmObject(value);
+  return {
+    id: cgmString(data, "id"),
+    sourceSystem: cgmString(data, "source_system"),
+    fileName: cgmString(data, "file_name"),
+    parsedCount: cgmNumber(data, "parsed_count"),
+    insertedCount: cgmNumber(data, "inserted_count"),
+    skippedCount: cgmNumber(data, "skipped_count"),
+    createdAt: cgmString(data, "created_at"),
+  };
+}
+
+export function parseCgmSeries(value: unknown): CgmSeries {
+  const data = cgmObject(value);
+  return {
+    days: cgmNumber(data, "days"),
+    count: cgmNumber(data, "count"),
+    samples: parseCgmSamples(data.samples ?? []),
+  };
+}
+
+export type GlucoseReport = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  device: string;
+  deviceSerial: string;
+  reportGeneratedAt: string | null;
+  meanMmol: number | null;
+  sdMmol: number | null;
+  cvPercent: number | null;
+  ehba1cPercent: number | null;
+  tirPercent: number | null;
+  tarPercent: number | null;
+  tbrPercent: number | null;
+  // 报告把 TIR 拆成五档时才有值：正常 / 低 / 很低 / 高 / 很高。
+  normalPercent: number | null;
+  lowPercent: number | null;
+  veryLowPercent: number | null;
+  highPercent: number | null;
+  veryHighPercent: number | null;
+  // 报告写的「低血糖风险」档位：high / moderate / low / lowest，没写是空串。
+  lbgiLevel: string;
+  // 原文件（患者发进对话的那份 PDF）的附件 id；没有就是 null，不显示「打开原报告」。
+  sourceAttachmentId: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
+function optionalNumber(data: Record<string, unknown>, key: string): number | null {
+  const value = data[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // 后端用 Numeric 存，序列化出来可能是字符串。
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export function parseGlucoseReport(value: unknown): GlucoseReport {
+  const data = cgmObject(value);
+  return {
+    id: cgmString(data, "id"),
+    periodStart: cgmString(data, "period_start"),
+    periodEnd: cgmString(data, "period_end"),
+    device: typeof data.device === "string" ? data.device : "",
+    deviceSerial: typeof data.device_serial === "string" ? data.device_serial : "",
+    reportGeneratedAt:
+      typeof data.report_generated_at === "string" ? data.report_generated_at : null,
+    meanMmol: optionalNumber(data, "mean_mmol"),
+    sdMmol: optionalNumber(data, "sd_mmol"),
+    cvPercent: optionalNumber(data, "cv_percent"),
+    ehba1cPercent: optionalNumber(data, "ehba1c_percent"),
+    tirPercent: optionalNumber(data, "tir_percent"),
+    tarPercent: optionalNumber(data, "tar_percent"),
+    tbrPercent: optionalNumber(data, "tbr_percent"),
+    normalPercent: optionalNumber(data, "normal_percent"),
+    lowPercent: optionalNumber(data, "low_percent"),
+    veryLowPercent: optionalNumber(data, "very_low_percent"),
+    highPercent: optionalNumber(data, "high_percent"),
+    veryHighPercent: optionalNumber(data, "very_high_percent"),
+    lbgiLevel: typeof data.lbgi_level === "string" ? data.lbgi_level : "",
+    sourceAttachmentId:
+      typeof data.source_attachment_id === "string" && data.source_attachment_id.length > 0
+        ? data.source_attachment_id
+        : null,
+    note: typeof data.note === "string" ? data.note : null,
+    createdAt: cgmString(data, "created_at"),
+  };
+}
+
+export type GlucoseReportPreview = {
+  fileName: string;
+  periodStart: string;
+  periodEnd: string;
+  reportGeneratedAt: string | null;
+  device: string;
+  deviceSerial: string;
+  hospital: string;
+  meanMmol: number | null;
+  sdMmol: number | null;
+  cvPercent: number | null;
+  ehba1cPercent: number | null;
+  normalPercent: number | null;
+  lowPercent: number | null;
+  veryLowPercent: number | null;
+  highPercent: number | null;
+  veryHighPercent: number | null;
+  // 报告上没印、或者版式里读不出来的项目：界面要说「没读到」，不能显示成 0。
+  missing: string[];
+};
+
+/**
+ * 服务端从 PDF 里读出来的字段。确认导入时把这份原样传回去，
+ * 所以它既是预览、也是写库的请求体。
+ */
+export function parseGlucoseReportPreview(value: unknown): GlucoseReportPreview {
+  const data = cgmObject(value);
+  const missing = Array.isArray(data.missing)
+    ? data.missing.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    fileName: typeof data.file_name === "string" ? data.file_name : "report.pdf",
+    periodStart: cgmString(data, "period_start"),
+    periodEnd: cgmString(data, "period_end"),
+    reportGeneratedAt:
+      typeof data.report_generated_at === "string" ? data.report_generated_at : null,
+    device: typeof data.device === "string" ? data.device : "",
+    deviceSerial: typeof data.device_serial === "string" ? data.device_serial : "",
+    hospital: typeof data.hospital === "string" ? data.hospital : "",
+    meanMmol: optionalNumber(data, "mean_mmol"),
+    sdMmol: optionalNumber(data, "sd_mmol"),
+    cvPercent: optionalNumber(data, "cv_percent"),
+    ehba1cPercent: optionalNumber(data, "ehba1c_percent"),
+    normalPercent: optionalNumber(data, "normal_percent"),
+    lowPercent: optionalNumber(data, "low_percent"),
+    veryLowPercent: optionalNumber(data, "very_low_percent"),
+    highPercent: optionalNumber(data, "high_percent"),
+    veryHighPercent: optionalNumber(data, "very_high_percent"),
+    missing,
+  };
+}
+
+export function parseGlucoseReports(value: unknown): GlucoseReport[] {
+  const data = cgmObject(value);
+  const items = data.items;
+  if (!Array.isArray(items)) return [];
+  return items.map(parseGlucoseReport);
 }

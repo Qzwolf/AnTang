@@ -125,6 +125,22 @@ class ProactiveCareSettings(Base):
         default=False,
         server_default=false(),
     )
+    # 连续没被回应的日常问候次数：达到 2 次自动降到每 3 天，达到 3 次自动暂停。
+    # 只统计「问候」这一种，回访计划与健康事件有自己的授权，不参与降频。
+    unanswered_contacts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+    )
+    auto_downgraded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # 自动暂停与用户主动关掉要分开记：设置页要能说清「是我们替你停的」。
+    auto_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
@@ -36,11 +37,20 @@ from antang_api.citations import (
 from antang_api.companion_memory import CompanionMemory
 from antang_api.context import prepare_chat_context
 from antang_api.context.health_profile import render_core_profile
+from antang_api.conversations import (
+    NEW_CONVERSATION_TITLE,
+    conversation_title,
+    ensure_chat_conversation,
+    owned_conversation,
+    touch_conversation,
+)
 from antang_api.health_profile.glucose import (
     GLUCOSE_CONTEXT_DAYS,
     list_glucose_readings,
+    list_glucose_reports,
     pending_hypo_review,
     render_glucose_context,
+    render_glucose_reports,
     summarize_glucose,
 )
 from antang_api.database import lock_user_conversation
@@ -51,6 +61,8 @@ from antang_api.models import (
     AgentToolCallStatus,
     CarePlan,
     CarePlanStatus,
+    Conversation,
+    FearBehaviorLog,
     GlucoseReading,
     Message,
     MessageAttachment,
@@ -75,6 +87,15 @@ from antang_api.psychosocial import read_latest_assessment, render_guidance
 from antang_api.psychosocial.hypo_review import render_hypo_review_prompt
 from antang_api.behavioral import read_fear_summary, render_behavior_context
 from antang_api.settings import settings
+from antang_api.tools.glucose import (
+    DELETE_GLUCOSE_REPORT_TOOL_NAME,
+    RECORD_GLUCOSE_REPORT_TOOL_NAME,
+    RECORD_GLUCOSE_TOOL_NAME,
+)
+from antang_api.tools.records import (
+    RECORD_MEAL_TOOL_NAME,
+    RECORD_MEDICATION_TOOL_NAME,
+)
 from antang_api.voice import (
     as_speech_cue_data,
     mark_speech_cue_consumed,
@@ -93,6 +114,10 @@ class ActiveAgentRunError(Exception):
 
 class ChatAttachmentError(Exception):
     """附件不存在、已发送，或者不属于当前用户。"""
+
+
+class ChatConversationRequired(Exception):
+    """指定的会话不存在，或者不属于当前用户。"""
 
 
 class ChatRetryError(Exception):
@@ -117,6 +142,11 @@ TOOL_ACTIVITY_PHASES: dict[str, ActivityPhase] = {
     "manage_care_plan": "organizing",
     "log_fear_behavior": "organizing",
     "record_hypoglycemia_belief": "organizing",
+    "record_meal": "organizing",
+    "record_medication": "organizing",
+    RECORD_GLUCOSE_TOOL_NAME: "organizing",
+    RECORD_GLUCOSE_REPORT_TOOL_NAME: "organizing",
+    DELETE_GLUCOSE_REPORT_TOOL_NAME: "organizing",
 }
 
 
@@ -127,6 +157,75 @@ class PreparedChatRun:
     user_message_id: UUID
     assistant_message_id: UUID
     run_id: UUID
+    conversation_id: UUID
+
+
+INSULIN_NOTICE = (
+    "顺便说一句：剂量的事按医生给的方案来，别自己加减。"
+    "刚才这件事我记在你的记录里了，之后你可以自己回看或删掉。"
+)
+
+# 「已经帮你记下来了」这类说法：模型说了、工具却没收下，就必须当场纠正。
+# 只匹配明确的记录口吻，避免「好的，我记住了」这种对话里的随口应答被误伤。
+RECORD_CLAIM_PATTERN = re.compile(
+    r"(帮你记(了|下|进|上)|已经(帮你)?记(下|进|录|好)|已记录|已经记录|"
+    r"记到(了)?你的记录|记进(了)?你的记录|帮你把.{0,16}记(下|进|录))"
+)
+
+RECORD_TOOL_NAMES = (
+    RECORD_MEAL_TOOL_NAME,
+    RECORD_MEDICATION_TOOL_NAME,
+    RECORD_GLUCOSE_TOOL_NAME,
+    RECORD_GLUCOSE_REPORT_TOOL_NAME,
+)
+
+RECORD_NOT_SAVED_NOTICE = (
+    "（补一句实话：刚才这条我没能写进你的记录，"
+    "麻烦你在「记录」页手动补一下，或者再说一次，我重新记。）"
+)
+
+
+async def _unconfirmed_record_claim(
+    session: AsyncSession,
+    prepared_run: PreparedChatRun,
+    content: str,
+) -> bool:
+    """这一轮说着「记下来了」，但没有任何一个记录工具真的成功。
+
+    线上真发生过：模型把工具参数摊平了，框架报 `request: Field required`，
+    工具没执行，回复却写着「已经帮你记下来了」，患者到记录页一看是空的。
+    提示词里已经写了「只有 recorded=true 才能说记好了」，但这件事不允许靠提示词兜，
+    所以在服务端核对一遍：说了就必须有成功落库的工具调用。
+    """
+
+    if RECORD_CLAIM_PATTERN.search(content) is None:
+        return False
+
+    stmt = select(AgentToolCall.status).where(
+        AgentToolCall.agent_run_id == prepared_run.run_id,
+        AgentToolCall.tool_name.in_(RECORD_TOOL_NAMES),
+    )
+    statuses = list((await session.execute(stmt)).scalars())
+    return AgentToolCallStatus.COMPLETED not in statuses
+
+
+async def _insulin_notice(session: AsyncSession, prepared_run: PreparedChatRun) -> str | None:
+    """这一轮如果记下了「自行加减胰岛素」，回复末尾补一句不指责的提醒。
+
+    写在服务端而不是只靠提示词：提示词偶尔不照做，而「改了剂量要提醒本人」这件事
+    不允许偶尔失效。措辞只说「按医生给的方案」，不评判、不追问。
+    """
+
+    stmt = (
+        select(FearBehaviorLog.kind)
+        .where(
+            FearBehaviorLog.source_message_id == prepared_run.user_message_id,
+            FearBehaviorLog.kind.in_(("insulin_change", "insulin_hold")),
+        )
+        .limit(1)
+    )
+    kinds = await session.scalar(stmt)
+    return INSULIN_NOTICE if kinds is not None else None
 
 
 async def prepare_chat_run(
@@ -135,6 +234,7 @@ async def prepare_chat_run(
     client_message_id: UUID,
     content: str,
     attachment_id: UUID | None = None,
+    conversation_id: UUID | None = None,
 ) -> PreparedChatRun:
     """原子创建用户消息、待生成消息和 Core Agent 运行记录，提交到数据库"""
 
@@ -147,6 +247,15 @@ async def prepare_chat_run(
     )
     try:
         await lock_user_conversation(session, user_id)
+        if conversation_id is not None:
+            conversation = await owned_conversation(
+                session, user_id=user_id, conversation_id=conversation_id
+            )
+            if conversation is None:
+                raise ChatConversationRequired("没有这段对话，先新建一段再发")
+        else:
+            # 老客户端不带 conversation_id：接到最近一段对话上。
+            conversation = await ensure_chat_conversation(session, user_id)
         attachment = None
         if attachment_id is not None:
             attachment = await session.scalar(
@@ -167,6 +276,10 @@ async def prepare_chat_run(
                 )
         session.add(user_message)
         await session.flush()
+        user_message.conversation_id = conversation.id
+        if conversation.title == NEW_CONVERSATION_TITLE and user_message.content.strip():
+            conversation.title = conversation_title(user_message.content)
+        await touch_conversation(session, conversation)
         if attachment is not None:
             attachment.message_id = user_message.id
         await record_user_activity(
@@ -181,6 +294,7 @@ async def prepare_chat_run(
             role=MessageRole.ASSISTANT,
             status=MessageStatus.GENERATING,
             content="",
+            conversation_id=conversation.id,
         )
         session.add(assistant_message)
         await session.flush()
@@ -202,6 +316,7 @@ async def prepare_chat_run(
             user_message_id=user_message.id,
             assistant_message_id=assistant_message.id,
             run_id=agent_run.id,
+            conversation_id=conversation.id,
         )
     except IntegrityError as error:
         await session.rollback()
@@ -280,6 +395,7 @@ async def prepare_chat_retry(
         role=MessageRole.ASSISTANT,
         status=MessageStatus.GENERATING,
         content="",
+        conversation_id=failed_message.conversation_id,
     )
     session.add(assistant_message)
 
@@ -306,10 +422,14 @@ async def prepare_chat_retry(
             raise ActiveAgentRunError() from error
         raise
 
+    if failed_message.conversation_id is None:
+        raise ChatRetryError("retry_message_not_found", "这条回答所属的对话已经不存在")
+
     return PreparedChatRun(
         user_message_id=original_run.trigger_message_id,
         assistant_message_id=assistant_message.id,
         run_id=agent_run.id,
+        conversation_id=failed_message.conversation_id,
     )
 
 
@@ -579,6 +699,10 @@ async def _complete_chat_run(
         # 这条 cue 留给下一次真正发出去的那一轮。
         await mark_speech_cue_consumed(session, cue_id=speech_cue_id, now=now)
 
+    conversation = await session.get(Conversation, prepared_run.conversation_id)
+    if conversation is not None:
+        await touch_conversation(session, conversation, at=now)
+
     await session.commit()
 
 
@@ -727,19 +851,30 @@ async def stream_chat_run(
         )
         # 患者自己记的血糖：模型只能从文字里猜，所以把近 7 天的读数摊开给它，
         # 并注明「自己记的、可能漏记」，免得被当成 CGM 曲线下判断。
-        glucose_context = render_glucose_context(
-            days=GLUCOSE_CONTEXT_DAYS,
-            summary=await summarize_glucose(
-                session,
-                user_id=user_id,
-                days=GLUCOSE_CONTEXT_DAYS,
-            ),
-            recent=await list_glucose_readings(
-                session,
-                user_id=user_id,
-                days=GLUCOSE_CONTEXT_DAYS,
-                limit=5,
-            ),
+        glucose_context = "\n".join(
+            part
+            for part in (
+                render_glucose_context(
+                    days=GLUCOSE_CONTEXT_DAYS,
+                    summary=await summarize_glucose(
+                        session,
+                        user_id=user_id,
+                        days=GLUCOSE_CONTEXT_DAYS,
+                    ),
+                    recent=await list_glucose_readings(
+                        session,
+                        user_id=user_id,
+                        days=GLUCOSE_CONTEXT_DAYS,
+                        limit=5,
+                    ),
+                ),
+                # 报告速览：患者发过 CGM 报告，模型就该记得那份报告说了什么，
+                # 而不是每轮都让患者再报一次数。
+                render_glucose_reports(
+                    await list_glucose_reports(session, user_id=user_id, limit=3),
+                ),
+            )
+            if part
         )
         # 复盘只问一次：读取最近 24 小时里偏低、还没问过的那一条。
         # prepare_chat_context 会 rollback，之后再碰 ORM 对象就会过期，
@@ -862,6 +997,7 @@ async def stream_chat_run(
             ),
             recent_tool_results_to_keep=(settings.context_recent_tool_results_to_keep),
             tools=tools,
+            conversation_id=prepared_run.conversation_id,
         )
         run_log.bind(
             context_tokens=prepared_context.input_tokens,
@@ -1013,6 +1149,21 @@ async def stream_chat_run(
             visible_turns=visible_turns,
         )
 
+        # 自行加减胰岛素的提醒补在回复末尾：先让模型把话说完整，再由服务端补这一句，
+        # 患者看到的语气就不受模型临场发挥影响。
+        # 「已经帮你记下来了」必须真的落库：工具失败或被参数挡下时，模型不会自己纠正。
+        if await _unconfirmed_record_claim(session, prepared_run, content):
+            logger.warning(
+                "助手说记录成功但这一轮没有成功的记录工具调用（run=%s）",
+                prepared_run.run_id,
+            )
+            content = f"{content}\n\n{RECORD_NOT_SAVED_NOTICE}"
+            yield TextDeltaEvent(delta=f"\n\n{RECORD_NOT_SAVED_NOTICE}")
+
+        insulin_notice = await _insulin_notice(session, prepared_run)
+        if insulin_notice is not None:
+            content = f"{content}\n\n{insulin_notice}"
+            yield TextDeltaEvent(delta=f"\n\n{insulin_notice}")
         await _complete_chat_run(
             session=session,
             prepared_run=prepared_run,

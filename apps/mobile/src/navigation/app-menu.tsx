@@ -1,20 +1,7 @@
-import {
-  ArrowRight01Icon,
-  BloodIcon,
-  FolderHeartIcon,
-  Message01Icon,
-  Settings04Icon,
-  SmartWatch01Icon,  // 新增：手环图标
-  ChartLineData01Icon,  // 新增：看板图标
-} from '@hugeicons/core-free-icons';
-import {
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { HeartCheckIcon, Message01Icon } from '@hugeicons/core-free-icons';
+import { useMemo } from 'react';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppIcon } from '../ui/icon';
@@ -23,73 +10,54 @@ import { colors, radii, spacing, typefaces } from '../ui/theme';
 export type ConversationAnchor = {
   group: string;
   id: string;
-  preview: string;
+  title: string;
   time: string;
 };
 
 type Props = {
   conversations: ConversationAnchor[];
+  activeConversationId?: string | null;
+  onNewChat?: () => void;
   onClose: () => void;
-  onOpenHealth: () => void;
-  onOpenSettings: () => void;
-  onOpenDashboard?: () => void;
-  onOpenPatientAccess?: () => void;
-  onOpenGlucose?: () => void;
-  onSelectConversation: (messageId: string) => void;
+  onOpenCare?: () => void;
+  onOpenProfile?: () => void;
+  onSelectConversation: (conversationId: string) => void;
   username: string;
   visible: boolean;
-  // ===== 新增：Gadgetbridge 相关 props =====
-  gadgetbridgeChecking?: boolean;
-  gadgetbridgeConnected?: boolean;
-  gadgetbridgeSyncing?: boolean;
-  gadgetbridgeError?: string | null;
-  gadgetbridgeProgress?: string | null;
-  gadgetbridgeLastSyncedAt?: string | null;
-  onGadgetbridgeConnect?: () => void;
-  onGadgetbridgeSync?: () => void;
 };
 
-function formatLastSync(value: string): string {
-  return new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
+type GroupedAnchor = {
+  anchor: ConversationAnchor;
+  startsGroup: boolean;
+};
+
+function groupAnchors(anchors: ConversationAnchor[]): GroupedAnchor[] {
+  const grouped: GroupedAnchor[] = [];
+  let previous: string | null = null;
+  for (const anchor of anchors) {
+    grouped.push({ anchor, startsGroup: anchor.group !== previous });
+    previous = anchor.group;
+  }
+  return grouped;
 }
 
-
+/**
+ * 侧边栏只放对话：新开一段、以及过去每一段。
+ * 健康档案、记录、设置这些入口统一在底部三个 tab 里，
+ * 不再在侧边栏重复一遍（重复会把「打开 App 第一眼看到什么」弄乱）。
+ */
 export function AppMenu({
   conversations,
+  activeConversationId = null,
+  onNewChat,
   onClose,
-  onOpenHealth,
-  onOpenSettings,
-  onOpenDashboard = () => { },
-  onOpenPatientAccess,
-  onOpenGlucose = () => { },
+  onOpenCare,
+  onOpenProfile,
   onSelectConversation,
   username,
   visible,
-  // ===== 新增：Gadgetbridge props 默认值 =====
-  gadgetbridgeChecking = false,
-  gadgetbridgeConnected = false,
-  gadgetbridgeSyncing = false,
-  gadgetbridgeError = null,
-  gadgetbridgeProgress = null,
-  gadgetbridgeLastSyncedAt = null,
-  onGadgetbridgeConnect = () => { },
-  onGadgetbridgeSync = () => { },
 }: Props) {
-  let previousGroup: string | null = null;
-
-  // Gadgetbridge 状态文案
-  const gadgetbridgeBusy = gadgetbridgeChecking || gadgetbridgeSyncing;
-  const gadgetbridgeStatus = gadgetbridgeChecking
-    ? '正在检查手环数据...'
-    : gadgetbridgeProgress ??
-    (gadgetbridgeLastSyncedAt === null
-      ? gadgetbridgeConnected
-        ? '手环数据已就绪'
-        : '选择华为手环的 Gadgetbridge 导出文件'
-      : `上次同步 ${formatLastSync(gadgetbridgeLastSyncedAt)}`);
+  const grouped = useMemo(() => groupAnchors(conversations), [conversations]);
 
   return (
     <Modal
@@ -108,182 +76,95 @@ export function AppMenu({
         />
         <SafeAreaView edges={['top', 'bottom', 'left']} style={styles.panel}>
           <View style={styles.accountRow}>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{username.slice(0, 1).toUpperCase()}</Text>
-            </View>
+            <Pressable
+              accessibilityLabel="打开我的资料"
+              accessibilityRole="button"
+              onPress={() => {
+                onClose();
+                onOpenProfile?.();
+              }}
+              style={styles.avatar}
+            >
+              <Text style={styles.avatarText}>
+                {username.slice(0, 1).toUpperCase()}
+              </Text>
+            </Pressable>
             <View style={styles.accountCopy}>
               <Text numberOfLines={1} style={styles.username}>
                 {username}
               </Text>
               <Text style={styles.accountHint}>安糖心语账号</Text>
             </View>
-            <Pressable
-              accessibilityLabel="打开设置"
-              accessibilityRole="button"
-              onPress={onOpenSettings}
-              style={({ pressed }) => [
-                styles.settingsButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <AppIcon icon={Settings04Icon} />
-            </Pressable>
           </View>
 
-          {onOpenPatientAccess === undefined ? null : (
-            <Pressable accessibilityLabel="医护授权" accessibilityRole="button"
-              onPress={onOpenPatientAccess} style={styles.healthEntry}>
-              <View style={styles.healthCopy}>
-                <Text style={styles.healthTitle}>医护授权</Text>
-                <Text style={styles.healthHint}>指定医护只读查看，随时撤销</Text>
-              </View>
-              <AppIcon color={colors.muted} icon={ArrowRight01Icon} size={20} />
-            </Pressable>
-          )}
-          {/* ===== 原有的健康档案入口 ===== */}
           <Pressable
-            accessibilityLabel="健康档案"
+            accessibilityLabel="开始新的对话"
             accessibilityRole="button"
-            onPress={onOpenHealth}
-            style={({ pressed }) => [
-              styles.healthEntry,
-              pressed && styles.healthEntryPressed,
-            ]}
+            onPress={onNewChat}
+            style={({ pressed }) => [styles.newChat, pressed && styles.pressed]}
           >
-            <View style={styles.healthIcon}>
-              <AppIcon color={colors.primaryPressed} icon={FolderHeartIcon} size={26} />
-            </View>
-            <View style={styles.healthCopy}>
-              <Text style={styles.healthTitle}>健康档案</Text>
-              <Text style={styles.healthHint}>档案、手环与健康记录</Text>
-            </View>
-            <AppIcon color={colors.muted} icon={ArrowRight01Icon} size={20} />
+            <AppIcon color={colors.primaryPressed} icon={Message01Icon} size={18} />
+            <Text style={styles.newChatText}>新的对话</Text>
           </Pressable>
 
-          {/* ===== 新增：健康看板入口 ===== */}
-          <Pressable
-            accessibilityLabel="健康看板"
-            accessibilityRole="button"
-            onPress={onOpenDashboard}
-            style={({ pressed }) => [
-              styles.healthEntry,
-              pressed && styles.healthEntryPressed,
-            ]}
-          >
-            <View style={styles.healthIcon}>
-              <AppIcon color={colors.primaryPressed} icon={ChartLineData01Icon} size={26} />
-            </View>
-            <View style={styles.healthCopy}>
-              <Text style={styles.healthTitle}>健康看板</Text>
-              <Text style={styles.healthHint}>查看近 30 天已保存的手环记录</Text>
-            </View>
-            <AppIcon color={colors.muted} icon={ArrowRight01Icon} size={20} />
-          </Pressable>
-
-          {/* ===== 新增：血糖记录入口 ===== */}
-          <Pressable
-            accessibilityLabel="血糖记录"
-            accessibilityRole="button"
-            onPress={onOpenGlucose}
-            style={({ pressed }) => [
-              styles.healthEntry,
-              pressed && styles.healthEntryPressed,
-            ]}
-          >
-            <View style={[styles.healthIcon, styles.glucoseIcon]}>
-              <AppIcon color="#B25F2A" icon={BloodIcon} size={26} />
-            </View>
-            <View style={styles.healthCopy}>
-              <Text style={styles.healthTitle}>血糖记录</Text>
-              <Text style={styles.healthHint}>记一条血糖，看看近 7 天</Text>
-            </View>
-            <AppIcon color={colors.muted} icon={ArrowRight01Icon} size={20} />
-          </Pressable>
-
-          {/* ===== 新增：Gadgetbridge 独立入口 ===== */}
-          <Pressable
-            accessibilityLabel="华为手环导入"
-            accessibilityRole="button"
-            disabled={gadgetbridgeBusy}
-            onPress={gadgetbridgeConnected ? onGadgetbridgeSync : onGadgetbridgeConnect}
-            style={({ pressed }) => [
-              styles.gadgetbridgeEntry,
-              gadgetbridgeBusy && styles.gadgetbridgeEntryDisabled,
-              pressed && !gadgetbridgeBusy && styles.gadgetbridgeEntryPressed,
-            ]}
-          >
-            <View style={styles.gadgetbridgeIcon}>
-              <AppIcon color="#0A7C6B" icon={SmartWatch01Icon} size={26} />
-            </View>
-            <View style={styles.gadgetbridgeCopy}>
-              <View style={styles.gadgetbridgeTitleRow}>
-                <Text style={styles.gadgetbridgeTitle}>华为手环导入</Text>
-                {gadgetbridgeConnected ? (
-                  <View style={styles.connectedBadge}>
-                    <Text style={styles.connectedBadgeText}>已连接</Text>
-                  </View>
-                ) : (
-                  <View style={styles.disconnectedBadge}>
-                    <Text style={styles.disconnectedBadgeText}>未连接</Text>
-                  </View>
-                )}
-              </View>
-              <Text style={styles.gadgetbridgeHint} numberOfLines={1}>
-                {gadgetbridgeBusy ? '⏳ 同步中...' : gadgetbridgeStatus}
-              </Text>
-              {gadgetbridgeError ? (
-                <Text style={styles.gadgetbridgeError} numberOfLines={2}>
-                  ⚠️ {gadgetbridgeError}
-                </Text>
-              ) : null}
-            </View>
-            <Text style={styles.gadgetbridgeAction}>
-              {gadgetbridgeBusy ? '...' : gadgetbridgeConnected ? '同步' : '连接'}
-            </Text>
-          </Pressable>
-
-
-          <View style={styles.sectionHeading}>
-            <AppIcon color={colors.muted} icon={Message01Icon} size={19} />
-            <Text style={styles.sectionTitle}>对话记录</Text>
-          </View>
+          <Text style={styles.sectionTitle}>对话</Text>
 
           <ScrollView
-            contentContainerStyle={styles.conversationList}
+            contentContainerStyle={styles.list}
             showsVerticalScrollIndicator={false}
           >
             {conversations.length === 0 ? (
-              <Text style={styles.emptyHistory}>开始聊天后，对话位置会显示在这里。</Text>
-            ) : (
-              conversations.map((conversation) => {
-                const showGroup = conversation.group !== previousGroup;
-                previousGroup = conversation.group;
-                return (
-                  <View key={conversation.id}>
-                    {showGroup ? (
-                      <Text style={styles.groupTitle}>{conversation.group}</Text>
-                    ) : null}
-                    <Pressable
-                      accessibilityLabel={`${conversation.time} ${conversation.preview}`}
-                      accessibilityRole="menuitem"
-                      onPress={() => onSelectConversation(conversation.id)}
-                      style={({ pressed }) => [
-                        styles.conversation,
-                        pressed && styles.conversationPressed,
+              <Text style={styles.empty}>还没有别的对话。</Text>
+            ) : null}
+            {grouped.map(({ anchor, startsGroup }) => {
+              const active = anchor.id === activeConversationId;
+              return (
+                <View key={anchor.id}>
+                  {startsGroup ? (
+                    <Text style={styles.groupTitle}>{anchor.group}</Text>
+                  ) : null}
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${anchor.title} ${anchor.time}`}
+                    onPress={() => onSelectConversation(anchor.id)}
+                    style={({ pressed }) => [
+                      styles.conversation,
+                      active && styles.conversationActive,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.conversationTitle,
+                        active && styles.conversationTitleActive,
                       ]}
                     >
-                      <Text style={styles.conversationTime}>
-                        {conversation.time}
-                      </Text>
-                      <Text numberOfLines={2} style={styles.conversationPreview}>
-                        {conversation.preview}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })
-            )}
+                      {anchor.title}
+                    </Text>
+                    <Text style={styles.conversationTime}>{anchor.time}</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
           </ScrollView>
+
+          {/* 主动关怀不属于任何一段对话，所以放在列表之外。 */}
+          <Pressable
+            accessibilityLabel="主动关怀"
+            accessibilityRole="button"
+            onPress={() => {
+              onClose();
+              onOpenCare?.();
+            }}
+            style={({ pressed }) => [styles.careRow, pressed && styles.pressed]}
+          >
+            <AppIcon color={colors.primaryPressed} icon={HeartCheckIcon} size={18} />
+            <View style={styles.careCopy}>
+              <Text style={styles.careTitle}>主动关怀</Text>
+              <Text style={styles.careHint}>糖糖主动发来的关心，可改频率</Text>
+            </View>
+          </Pressable>
         </SafeAreaView>
       </View>
     </Modal>
@@ -293,221 +174,145 @@ export function AppMenu({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'rgba(10, 28, 25, 0.34)',
+    backgroundColor: 'rgba(10, 30, 28, 0.35)',
   },
   panel: {
-    width: '86%',
-    maxWidth: 400,
+    width: '84%',
+    maxWidth: 360,
+    height: '100%',
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.sm,
     backgroundColor: colors.background,
-    boxShadow: '8px 0 30px rgba(23, 48, 46, 0.16)',
   },
   accountRow: {
-    minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+    paddingVertical: spacing.md,
   },
   avatar: {
-    width: 48,
-    height: 48,
+    width: 46,
+    height: 46,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: radii.pill,
     backgroundColor: colors.primary,
   },
   avatarText: {
-    color: colors.white,
+    color: colors.paper,
     fontFamily: typefaces.sansMedium,
     fontSize: 19,
+    fontWeight: '700',
   },
-  accountCopy: { flex: 1, gap: 2 },
+  accountCopy: {
+    flex: 1,
+  },
   username: {
     color: colors.ink,
     fontFamily: typefaces.sansMedium,
-    fontSize: 18,
+    fontSize: 17,
+    fontWeight: '600',
   },
   accountHint: {
     color: colors.muted,
     fontFamily: typefaces.sans,
     fontSize: 12,
   },
-  settingsButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radii.pill,
-    backgroundColor: colors.paper,
-  },
-  pressed: { opacity: 0.64 },
-
-  // ===== 原有的健康档案样式 =====
-  healthEntry: {
-    minHeight: 82,
+  newChat: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    marginTop: spacing.lg,
-    paddingHorizontal: spacing.md,
-    borderWidth: 1,
-    borderColor: '#CBEAE2',
-    borderRadius: radii.lg,
-    borderCurve: 'continuous',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.pill,
     backgroundColor: colors.primarySoft,
   },
-  healthEntryPressed: { opacity: 0.74, transform: [{ scale: 0.99 }] },
-  healthIcon: {
-    width: 44,
-    height: 44,
+  newChatText: {
+    color: colors.primaryPressed,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  sectionTitle: {
+    color: colors.muted,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 12,
+    letterSpacing: 0.4,
+    marginBottom: spacing.xs,
+  },
+  list: {
+    paddingBottom: spacing.xl,
+  },
+  empty: {
+    color: colors.faint,
+    fontFamily: typefaces.sans,
+    fontSize: 13,
+    paddingVertical: spacing.sm,
+  },
+  groupTitle: {
+    color: colors.faint,
+    fontFamily: typefaces.sans,
+    fontSize: 12,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  conversation: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginBottom: 6,
+    minHeight: 46,
+    paddingHorizontal: spacing.sm,
     borderRadius: radii.md,
     backgroundColor: colors.paper,
   },
-  glucoseIcon: { backgroundColor: '#FBEEE2' },
-  healthCopy: { flex: 1, gap: 3 },
-  healthTitle: {
+  conversationActive: {
+    backgroundColor: colors.primarySoft,
+  },
+  conversationTitle: {
+    flex: 1,
     color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 16,
-  },
-  healthHint: {
-    color: colors.muted,
     fontFamily: typefaces.sans,
-    fontSize: 12,
+    fontSize: 14,
   },
-
-  // ===== 新增：Gadgetbridge 样式 =====
-  gadgetbridgeEntry: {
-    minHeight: 72,
+  conversationTitleActive: {
+    color: colors.primaryPressed,
+    fontFamily: typefaces.sansMedium,
+    fontWeight: '600',
+  },
+  conversationTime: {
+    width: 66,
+    textAlign: 'right',
+    color: colors.faint,
+    fontFamily: typefaces.sans,
+    fontSize: 10.5,
+  },
+  pressed: {
+    opacity: 0.72,
+  },
+  careRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     marginTop: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderWidth: 1,
-    borderColor: '#B8D9E8',
-    borderRadius: radii.lg,
-    borderCurve: 'continuous',
-    backgroundColor: '#F0F8FC',
-  },
-  gadgetbridgeEntryPressed: { opacity: 0.74, transform: [{ scale: 0.99 }] },
-  gadgetbridgeEntryDisabled: { opacity: 0.5 },
-  gadgetbridgeIcon: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
     borderRadius: radii.md,
-    backgroundColor: colors.paper,
+    backgroundColor: colors.primarySoft,
   },
-  gadgetbridgeCopy: { flex: 1, gap: 2 },
-  gadgetbridgeTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
+  careCopy: {
+    flex: 1,
   },
-  gadgetbridgeTitle: {
-    color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 14,
-  },
-  connectedBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: radii.pill,
-    backgroundColor: '#15966A',
-  },
-  connectedBadgeText: {
-    color: colors.white,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 9,
-  },
-  disconnectedBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: radii.pill,
-    backgroundColor: '#D1D5DB',
-  },
-  disconnectedBadgeText: {
-    color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 9,
-  },
-  gadgetbridgeHint: {
-    color: colors.muted,
-    fontFamily: typefaces.sans,
-    fontSize: 11,
-  },
-  gadgetbridgeError: {
-    color: colors.danger,
-    fontFamily: typefaces.sans,
-    fontSize: 10,
-  },
-  gadgetbridgeAction: {
-    color: '#0A7C6B',
-    fontFamily: typefaces.sansMedium,
-    fontSize: 13,
-  },
-
-  sectionHeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingTop: spacing.xl,
-    paddingHorizontal: spacing.xs,
-  },
-  sectionTitle: {
-    color: colors.ink,
-    fontFamily: typefaces.sansMedium,
-    fontSize: 15,
-  },
-  conversationList: { paddingTop: spacing.sm, paddingBottom: spacing.lg },
-  emptyHistory: {
-    padding: spacing.md,
-    color: colors.muted,
-    fontFamily: typefaces.sans,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  groupTitle: {
-    paddingHorizontal: spacing.xs,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xxs,
+  careTitle: {
     color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
-    fontSize: 12,
-    letterSpacing: 0.4,
+    fontSize: 14,
+    fontWeight: '600',
   },
-  conversation: {
-    alignItems: 'flex-start',
-    backgroundColor: colors.paper,
-    borderRadius: radii.sm,
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: 6,
-    minHeight: 58,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  conversationPressed: { backgroundColor: colors.paperMuted },
-  conversationTime: {
-    color: colors.faint,
+  careHint: {
+    color: colors.muted,
     fontFamily: typefaces.sans,
     fontSize: 11,
-    fontVariant: ['tabular-nums'],
-    lineHeight: 20,
-    width: 40,
-  },
-  conversationPreview: {
-    color: colors.text,
-    flex: 1,
-    fontFamily: typefaces.sans,
-    fontSize: 14,
-    lineHeight: 20,
   },
 });

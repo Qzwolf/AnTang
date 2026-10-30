@@ -1,5 +1,5 @@
 import re
-from datetime import time
+from datetime import datetime, time
 from typing import Annotated, Any
 from zoneinfo import available_timezones
 
@@ -47,6 +47,11 @@ class ProactiveCareSettingsPayload(BaseModel):
     quiet_hours_start: time
     quiet_hours_end: time
     health_notification_preview_enabled: bool
+    # 打扰预算的只读部分：本周已经主动联系了几次、上限几次、是不是我们替你停了。
+    weekly_contact_count: int = 0
+    weekly_contact_limit: int | None = None
+    auto_paused: bool = False
+    auto_downgraded_at: datetime | None = None
 
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 

@@ -18,6 +18,8 @@ import {
 type Options = {
   api: ApiClient;
   userId: string;
+  /** 正在看的这一段对话：回到前台刷新时只拉它，别把别的会话塞进来。 */
+  conversationId: string | null;
   historyReady: boolean;
   streamActive: boolean;
   onMessages: (messages: ChatMessage[], targetMessageId: string | null) => void;
@@ -36,6 +38,7 @@ type PendingAction =
 export function useNotifications({
   api,
   userId,
+  conversationId,
   historyReady,
   streamActive,
   onMessages,
@@ -51,6 +54,7 @@ export function useNotifications({
   const processing = useRef(false);
   const mounted = useRef(true);
   const currentUserId = useRef(userId);
+  const conversationIdRef = useRef(conversationId);
   const historyReadyRef = useRef(historyReady);
   const streamActiveRef = useRef(streamActive);
   const onMessagesRef = useRef(onMessages);
@@ -77,7 +81,7 @@ export function useNotifications({
         try {
           const page =
             next.type === 'latest'
-              ? await api.getMessages()
+              ? await api.getMessages(null, conversationIdRef.current)
               : await api.getMessageWindow(next.data.messageId);
           if (!mounted.current || currentUserId.current !== userId) return;
           if (!historyReadyRef.current || streamActiveRef.current) {
@@ -201,12 +205,21 @@ export function useNotifications({
 
   useEffect(() => {
     currentUserId.current = userId;
+    conversationIdRef.current = conversationId;
     historyReadyRef.current = historyReady;
     streamActiveRef.current = streamActive;
     onMessagesRef.current = onMessages;
     onErrorRef.current = onError;
     void processPending();
-  }, [historyReady, onError, onMessages, processPending, streamActive, userId]);
+  }, [
+    conversationId,
+    historyReady,
+    onError,
+    onMessages,
+    processPending,
+    streamActive,
+    userId,
+  ]);
 
   useEffect(() => {
     void syncAutomatically();

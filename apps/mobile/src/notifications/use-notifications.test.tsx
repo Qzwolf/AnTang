@@ -68,6 +68,8 @@ const mockClearLastNotificationResponse = jest.mocked(
 );
 const mockGetItemAsync = jest.mocked(SecureStore.getItemAsync);
 
+const CONVERSATION_ID = '019b4444-4444-7444-8444-444444444444';
+
 const proactiveMessage: ChatMessage = {
   id: '019b5555-5555-7555-8555-555555555555',
   clientMessageId: null,
@@ -147,6 +149,7 @@ describe('useNotifications', () => {
       useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady: true,
         streamActive,
         onMessages,
@@ -195,6 +198,7 @@ describe('useNotifications', () => {
       requestPermission = useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady: true,
         streamActive: false,
         onMessages: jest.fn(),
@@ -247,6 +251,7 @@ describe('useNotifications', () => {
       useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady: true,
         streamActive,
         onMessages,
@@ -299,6 +304,7 @@ describe('useNotifications', () => {
       useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady,
         streamActive: false,
         onMessages,
@@ -344,6 +350,7 @@ describe('useNotifications', () => {
       useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady: true,
         streamActive,
         onMessages,
@@ -363,7 +370,7 @@ describe('useNotifications', () => {
       tree!.update(<Probe streamActive={false} />);
     });
 
-    expect(api.getMessages).toHaveBeenCalledWith();
+    expect(api.getMessages).toHaveBeenCalledWith(null, CONVERSATION_ID);
     expect(onMessages).toHaveBeenCalledWith([proactiveMessage], null);
     act(() => tree!.unmount());
   });
@@ -390,6 +397,7 @@ describe('useNotifications', () => {
       const notifications = useNotifications({
         api,
         userId: '019b7777-7777-7777-8777-777777777777',
+        conversationId: CONVERSATION_ID,
         historyReady: true,
         streamActive: false,
         onMessages,

@@ -2,19 +2,26 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from langchain_core.tools import StructuredTool
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from antang_api.behavioral import (
     BeliefNode,
     FearSummary,
+    delete_behavior_log,
+    read_behavior_logs,
     read_fear_summary,
     record_behavior,
     record_belief,
     render_behavior_context,
 )
 from antang_api.models import PsychosocialAssessment, User
-from antang_api.tools.behavior import BeliefRequest, FearBehaviorRequest
+from antang_api.tools.behavior import (
+    BeliefRequest,
+    FearBehaviorRequest,
+    build_behavior_tools,
+)
 
 NOW = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
 
@@ -238,6 +245,64 @@ async def test_beliefs_and_behaviors_do_not_leak_between_users(
     assert summary.behavior_total == 0
 
 
+async def test_deleted_behavior_disappears_for_the_patient(
+    db_session: AsyncSession,
+) -> None:
+    user = await _user(db_session, "deletes")
+    log = record_behavior(
+        db_session,
+        user_id=user.id,
+        kind="night_check",
+        occurred_at=NOW - timedelta(hours=6),
+    )
+    await db_session.flush()
+
+    assert await delete_behavior_log(db_session, user_id=user.id, log_id=log.id)
+    await db_session.flush()
+
+    assert await read_behavior_logs(db_session, user_id=user.id, now=NOW) == []
+    summary = await read_fear_summary(db_session, user_id=user.id, now=NOW)
+    assert summary.behavior_total == 0
+
+
+async def test_deleted_behavior_stays_visible_to_the_clinician(
+    db_session: AsyncSession,
+) -> None:
+    # 患者删掉只影响自己的界面；医护端要留着，并标出「患者已删除」。
+    user = await _user(db_session, "clinic_keeps")
+    log = record_behavior(
+        db_session,
+        user_id=user.id,
+        kind="insulin_change",
+        occurred_at=NOW - timedelta(hours=2),
+        note="自己从 8 加到 12",
+    )
+    await db_session.flush()
+    assert await delete_behavior_log(db_session, user_id=user.id, log_id=log.id)
+    await db_session.flush()
+
+    rows = await read_behavior_logs(
+        db_session, user_id=user.id, now=NOW, include_deleted=True
+    )
+
+    assert [row.id for row in rows] == [log.id]
+    assert rows[0].deleted_at is not None
+
+
+async def test_deleting_twice_is_a_not_found(
+    db_session: AsyncSession,
+) -> None:
+    user = await _user(db_session, "twice")
+    log = record_behavior(
+        db_session, user_id=user.id, kind="extra_check", occurred_at=NOW
+    )
+    await db_session.flush()
+
+    assert await delete_behavior_log(db_session, user_id=user.id, log_id=log.id)
+    await db_session.flush()
+    assert not await delete_behavior_log(db_session, user_id=user.id, log_id=log.id)
+
+
 def test_behavior_request_rejects_unknown_kind() -> None:
     with pytest.raises(ValidationError):
         FearBehaviorRequest.model_validate({"kind": "because_i_worry"})
@@ -258,6 +323,23 @@ def test_belief_request_rejects_unknown_code() -> None:
 def test_belief_request_rejects_empty_quote() -> None:
     with pytest.raises(ValidationError):
         BeliefRequest.model_validate({"belief_code": "hypo_is_fault", "quote": ""})
+
+
+def test_the_belief_tool_takes_flat_arguments() -> None:
+    """模型在嵌套 request 上犹豫过，改成平铺参数后它才愿意调。"""
+
+    behavior_tool, belief_tool = build_behavior_tools()
+
+    assert isinstance(belief_tool, StructuredTool)
+    assert set(belief_tool.args) == {
+        "belief_code",
+        "quote",
+        "occurrence",
+        "trigger_context",
+        "fear_intensity",
+    }
+    assert isinstance(behavior_tool, StructuredTool)
+    assert set(behavior_tool.args) == {"kind", "count", "occurred_at", "note"}
 
 def _summary_with(mentions: int) -> FearSummary:
     now = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)

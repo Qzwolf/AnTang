@@ -275,7 +275,10 @@ async def test_push_worker_sends_then_checks_the_same_ticket(
     assert await worker.run_once(now=now) is True
     assert len(client.sent) == 1
     payload = client.sent[0]
-    assert payload["body"] == "今天感觉怎么样？"
+    # 锁屏文案只有称呼和问候，不带消息正文，也不带任何健康信息。
+    body = cast(str, payload["body"])
+    assert "糖糖想跟你聊两句" in body
+    assert "今天感觉怎么样" not in body
     assert payload["channelId"] == "care-checkins-v2"
     assert payload["sound"] == "default"
     assert payload["collapseId"] == str(delivery_id)
