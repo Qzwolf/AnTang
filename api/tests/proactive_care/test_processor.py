@@ -1770,3 +1770,213 @@ async def test_proactive_context_carries_recent_behaviors_and_beliefs(
     assert "低血糖会让我昏迷" in behavior_context
     # 次数只供起草时决定问什么，不允许出现在发给用户的话里。
     assert "不要在回复里报这些次数" in behavior_context
+
+
+async def _seed_sent_routine_contacts(
+    user_id: UUID,
+    *,
+    sent_at_each: list[datetime],
+) -> None:
+    async with session_factory() as session:
+        for sent_at in sent_at_each:
+            message = Message(
+                user_id=user_id,
+                role=MessageRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                content="上周的问候。",
+                created_at=sent_at,
+                completed_at=sent_at,
+            )
+            # 每条都有人回：这样「连续没人理」的暂停策略不会插手，测的只是额度。
+            reply = Message(
+                user_id=user_id,
+                role=MessageRole.USER,
+                status=MessageStatus.COMPLETED,
+                content="嗯，还行。",
+                created_at=sent_at + timedelta(minutes=10),
+                completed_at=sent_at + timedelta(minutes=10),
+            )
+            session.add_all([message, reply])
+            await session.flush()
+            past_task = ProactiveCareTask(
+                user_id=user_id,
+                kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+                status=ProactiveCareTaskStatus.COMPLETED,
+                due_at=sent_at,
+                expires_at=sent_at + timedelta(hours=12),
+                finished_at=sent_at,
+                response_message_id=reply.id,
+            )
+            session.add(past_task)
+            await session.flush()
+            session.add(
+                AgentRun(
+                    user_id=user_id,
+                    trigger_message_id=None,
+                    trigger_care_task_id=past_task.id,
+                    result_message_id=message.id,
+                    parent_run_id=None,
+                    agent_name=PROACTIVE_CARE_AGENT_NAME,
+                    model="test-model",
+                    status=AgentRunStatus.COMPLETED,
+                    finished_at=sent_at,
+                )
+            )
+        await session.commit()
+
+
+async def test_a_full_week_moves_the_routine_check_in_to_the_next_free_slot(
+    committed_user_id: UUID,
+) -> None:
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(days=4)
+    await _seed_sent_routine_contacts(
+        committed_user_id,
+        sent_at_each=[
+            oldest,
+            oldest + timedelta(days=1),
+            oldest + timedelta(days=2),
+        ],
+    )
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        task = ProactiveCareTask(
+            user_id=committed_user_id,
+            kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+            status=ProactiveCareTaskStatus.SCHEDULED,
+            due_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(days=5),
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+    draft_graph = FakeGraph(
+        ProactiveCareDecision(
+            action="send",
+            message="这周已经说过几次话了，这条不该发出去。",
+            reason="日常问候到期",
+        )
+    )
+    processor = ProactiveCareProcessor(
+        agent=cast(Any, draft_graph),
+        auditor=cast(
+            Any,
+            FakeGraph(ProactiveCareAudit(decision="approve", reason="内容安全")),
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+    )
+
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+    assert not draft_graph.calls, "额度用完时不应该惊动起草 Agent"
+    async with session_factory() as session:
+        task = await session.get(ProactiveCareTask, task_id)
+        assert task is not None
+        assert task.status == ProactiveCareTaskStatus.SCHEDULED
+        assert task.outcome_reason == "weekly_contact_limit"
+        assert task.due_at == oldest + timedelta(days=7)
+        assert (
+            await session.scalar(
+                select(Message.id).where(
+                    Message.user_id == committed_user_id,
+                    Message.role == MessageRole.ASSISTANT,
+                    Message.created_at > now - timedelta(hours=1),
+                )
+            )
+            is None
+        )
+
+
+async def test_a_full_week_that_outlives_the_task_schedules_a_new_one(
+    committed_user_id: UUID,
+) -> None:
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(days=6, hours=18)
+    await _seed_sent_routine_contacts(
+        committed_user_id,
+        sent_at_each=[
+            oldest,
+            oldest + timedelta(hours=1),
+            oldest + timedelta(hours=2),
+        ],
+    )
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        # 三条问候之后患者回过话，所以不是「连续没人理」，不该自动暂停。
+        session.add(
+            Message(
+                user_id=committed_user_id,
+                role=MessageRole.USER,
+                status=MessageStatus.COMPLETED,
+                content="嗯，还行。",
+                created_at=oldest + timedelta(hours=3),
+                completed_at=oldest + timedelta(hours=3),
+            )
+        )
+        task = ProactiveCareTask(
+            user_id=committed_user_id,
+            kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+            status=ProactiveCareTaskStatus.SCHEDULED,
+            due_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(hours=2),
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+    processor = ProactiveCareProcessor(
+        agent=cast(
+            Any,
+            FakeGraph(
+                ProactiveCareDecision(
+                    action="send",
+                    message="这条不该发出去。",
+                    reason="日常问候到期",
+                )
+            ),
+        ),
+        auditor=cast(
+            Any,
+            FakeGraph(ProactiveCareAudit(decision="approve", reason="内容安全")),
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+    )
+
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+    async with session_factory() as session:
+        task = await session.get(ProactiveCareTask, task_id)
+        assert task is not None
+        assert task.status == ProactiveCareTaskStatus.EXPIRED
+        assert task.outcome_reason == "weekly_contact_limit_expired"
+        # 额度腾出来之前这一轮就到点了，于是排下一次，而不是永远不再问候。
+        next_task = await session.scalar(
+            select(ProactiveCareTask)
+            .where(
+                ProactiveCareTask.user_id == committed_user_id,
+                ProactiveCareTask.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+                ProactiveCareTask.status == ProactiveCareTaskStatus.SCHEDULED,
+            )
+            .order_by(ProactiveCareTask.id.desc())
+        )
+        assert next_task is not None
+        assert next_task.id != task_id
+        # 按用户自己的日常节奏（每 3 天）重排，到那天额度早就腾出来了。
+        assert abs((next_task.due_at - now) - timedelta(days=3)) < timedelta(seconds=5)

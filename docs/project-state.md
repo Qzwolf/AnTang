@@ -611,17 +611,16 @@ ruff 干净、pyright 0 errors（本机没有 `pyright.exe`，用 `.venv\Scripts
 本地那份 `9ae8449` 内容相同）。等 `github.com` 通了要 `git fetch team && git reset --hard
 team/aya/nav-v2-team-merge` 把两边对齐——**REST 推上去的提交和本地提交哈希不同，别装作没发生**。
 
+### 2026-10-30 深夜：每周最多联系几次，从「建议」变成真的闸门
 
+`psychosocial.support` 里的四象限剂量（高恐惧+感知受损 4、低恐惧+感知受损 5、其余 2/3，没评估按 3）一直只是写进提示词的一句话，模型可以不理；程序侧只有「两条日常问候至少隔 24 小时」这一条间隔。
 
+现在 `api/src/antang_api/proactive_care/quota.py` 数近七天真正发出去的主动消息（消息 + 任务 + 连起来的 `AgentRun`，和「最近一次主动联系」同一套口径），到上限就按下面的规则处理：
 
+- 还没到上限：照常起草。
+- 到上限且额度在任务过期前会腾出来：任务回 `SCHEDULED`，原因 `weekly_contact_limit`，`due_at` 设成「最早那条掉出七天窗口」的时刻。
+- 到上限且额度腾出来时任务已过期：任务 `EXPIRED`（原因 `weekly_contact_limit_expired`），并按用户自己的日常节奏排下一次，不让人从此收不到问候。
 
+没有心理社会评估时按中间档 3 次算；有评估结果就按四象限的剂量走。健康事件、一次性提醒、计划回访不受这条限制（它们本来就是 `must_send`）。
 
-
-
-
-
-
-
-
-
-
+测试：`api/tests/proactive_care/test_weekly_quota.py` 三例（中间档默认 3、四象限 4 次的边界、超过七天的不占名额）+ `test_processor.py` 两例（额度用完时把任务推到下一次可用时刻且不惊动起草 Agent；额度腾出来前任务已过期时排新任务）。后端全量 606 passed（4 个 Windows 上已知的 asyncio 用例失败，与本批无关），`ruff`、`pyright` 干净。
