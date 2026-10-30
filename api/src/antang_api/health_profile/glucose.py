@@ -22,6 +22,10 @@ from antang_api.models.health_profile import PersonalProfile
 GLUCOSE_TARGET_LOW_DEFAULT = 70
 GLUCOSE_TARGET_HIGH_DEFAULT = 180
 
+# 旧安装包（26102504 及更早）只认「低于 70 mg/dL = 3.9 的次数」这一项，
+# 读到缺字段就直接报错、整页血糖空掉。这一项只为它们保留，和患者目标范围无关。
+LEGACY_LOW_MG_DL = 70
+
 
 async def glucose_targets(session: AsyncSession, *, user_id: UUID) -> tuple[int, int]:
     """患者自己设的血糖目标范围（mg/dL）；没设过就是默认的 70–180。"""
@@ -148,6 +152,11 @@ class GlucoseSummary(TypedDict):
     below_target_count: int
     in_target_count: int
     above_target_count: int
+    # 兼容旧安装包（26102504 及更早）：「低于 3.9 的次数」当年是按固定 70 mg/dL 算的，
+    # 这些包读不到 below_70_count 会直接报错、整个血糖页空掉。
+    # 所以这一项保留成「低于 LEGACY_LOW_MG_DL 的条数」，和新目标范围无关。
+    # 等线上连旧包都没有了再删。
+    below_70_count: int
 
 
 async def summarize_glucose(
@@ -177,6 +186,9 @@ async def summarize_glucose(
                 func.count(GlucoseReading.id).filter(
                     GlucoseReading.value_mg_dl > high
                 ),
+                func.count(GlucoseReading.id).filter(
+                    GlucoseReading.value_mg_dl < LEGACY_LOW_MG_DL
+                ),
             ).where(
                 GlucoseReading.user_id == user_id,
                 GlucoseReading.revoked_at.is_(None),
@@ -202,6 +214,7 @@ async def summarize_glucose(
         "below_target_count": int(row[4] or 0),
         "in_target_count": int(row[5] or 0),
         "above_target_count": int(row[6] or 0),
+        "below_70_count": int(row[7] or 0),
     }
 
 

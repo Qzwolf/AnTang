@@ -184,6 +184,9 @@ async def test_the_patients_own_target_range_decides_what_counts_as_low(
     assert summary["below_target_count"] == 1
     assert summary["in_target_count"] == 1
     assert summary["above_target_count"] == 1
+    # 旧安装包只认固定 70 mg/dL 的「低于 3.9 次数」：78 不算，所以是 0。
+    # 这一项必须继续跟着 70 走，不能换成患者目标，否则老版本会把它当成自己的目标。
+    assert summary["below_70_count"] == 0
     assert "低于 4.4 的 1 次" in rendered
     assert "高于 8.9 的 1 次" in rendered
     # 模型必须知道这是患者自己设的范围，别拿 3.9–10.0 套他。
@@ -200,6 +203,7 @@ async def test_a_target_range_the_patient_did_not_set_falls_back_to_the_usual_on
     summary = await summarize_glucose(db_session, user_id=user.id, days=7)
 
     assert summary["below_target_count"] == 1
+    assert summary["below_70_count"] == 1
 
 
 async def test_a_nonsense_target_range_is_refused(

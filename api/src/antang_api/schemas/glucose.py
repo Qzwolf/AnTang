@@ -84,6 +84,9 @@ class GlucoseSummaryResponse(BaseModel):
     below_target_count: int
     in_target_count: int
     above_target_count: int
+    # 只为旧安装包保留（26102504 及更早按固定 70 mg/dL 显示「低于 3.9 的次数」，
+    # 字段不在就报错、整个血糖页空掉）。新界面读上面的目标范围字段。
+    below_70_count: int
 
 
 class GlucoseTargetResponse(BaseModel):
