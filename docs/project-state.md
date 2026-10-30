@@ -557,6 +557,36 @@ ruff 干净、pyright 0 errors。
 教训：临床阈值不要写进常量——同一个数字对 30 岁和 75 岁不是一回事；能让患者（和他的医生）
 自己定，就别替他定。
 
+### 2026-10-30 白天：字段改名把手机上已经装好的包打黑了
+
+把 `below_70_count` 改名叫 `below_target_count` 之后，手机上装着 26102504 的账号打开
+血糖页直接报「血糖数据缺少 below_70_count」、列表显示「还没有记录」。数据一条没少，是
+`parseGlucoseSummary` 读不到旧字段就抛错，整页渲染失败。
+
+- 接口同时返回 `below_70_count`（固定按 70 mg/dL 算，只为旧包兼容）与
+  `below_target_count`（按患者目标算）。语义不同的两个数分开给，不混用。
+- 教训：**线上还有旧安装包时，响应字段只能加不能改名**。想改名，先发一版兼容字段，
+  等旧包退场再删。
+
+### 2026-10-30 白天：合团队的临床分支，把 `ck_glucose_source` 的两种写法并起来
+
+团队 master（临床工作台、研究数据导入、交互式血糖图）和我们这条血糖线都改过
+`ck_glucose_source`：我们扩到 `manual/fingerstick/cgm/lab/report`，团队扩到
+`manual/report/public_dataset/ohio_cgm`。两条线各自写死自己认识的值，谁最后跑谁说了算，
+患者录一条指尖血就可能撞上约束。
+
+- 新增合并点迁移 `m2a3b4c5d6e7`（`down_revision = ("h1c2d3e4f5a6", "v19ae2b35d48")`），
+  把两边并成七个值的集合；`GLUCOSE_SOURCES` 同步取并集，患者能选的来源（`GlucoseInputSource`）
+  仍是四种。`alembic` 从此只有一个 head。
+- `test_schema_branch_merge.py` 的 head 断言改到合并点；`tests/test_schema_branch_merge.py::test_existing_local_and_server_branches_upgrade_without_losing_users`
+  在本机 Windows 上会因 `asyncio` 的 Proactor 限制 `NotImplementedError`（一直都把它排除在
+  全量之外），单跑 `test_unified_schema_has_one_head` 通过。
+- 验证：后端 **600 passed**（含团队新增的 study / public-import 用例）、ruff 干净、
+  `alembic current` = `m2a3b4c5d6e7 (mergepoint)`。
+- 教训：两支队伍各自扩同一个 CHECK 约束时，别指望「谁后跑谁赢」，要么提前约定同一份
+  来源表，要么在合并点显式并起来。
+
+
 
 
 
