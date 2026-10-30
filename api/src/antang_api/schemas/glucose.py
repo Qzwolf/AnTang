@@ -11,7 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 GlucoseContext = Literal[
     "fasting", "pre_meal", "post_meal", "bedtime", "night", "other"
 ]
-GlucoseSource = Literal["manual", "fingerstick", "cgm", "lab", "report"]
+GlucoseSource = Literal[
+    "manual", "fingerstick", "cgm", "lab", "report", "public_dataset", "ohio_cgm"
+]
 # 「report」只由报告解读写入，患者手填/导入能选的来源是下面四个。
 GlucoseInputSource = Literal["fingerstick", "cgm", "lab", "manual"]
 # 指尖血的机器品牌。它不是来源（来源是"指尖血"），只是"用哪台测的"，

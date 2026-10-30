@@ -30,8 +30,18 @@ GLUCOSE_CONTEXTS: tuple[str, ...] = (
 )
 
 # manual = 患者自己填（旧数据保留这个值）；fingerstick = 指尖血；cgm = CGM 点值；
-# lab = 化验单；report = 从报告解析出来。永远带着 source，免得拿解析结果去冒充手工测量。
-GLUCOSE_SOURCES: tuple[str, ...] = ("manual", "fingerstick", "cgm", "lab", "report")
+# lab = 化验单；report = 从报告解析出来；public_dataset / ohio_cgm = 研究用的公开
+# 数据集（Ohio T1DM 等），不是患者自己测的。永远带着 source，免得拿别人/解析来的
+# 数字去冒充患者自己的测量。
+GLUCOSE_SOURCES: tuple[str, ...] = (
+    "manual",
+    "fingerstick",
+    "cgm",
+    "lab",
+    "report",
+    "public_dataset",
+    "ohio_cgm",
+)
 
 # 测量时间的精度。exact = 有时刻（自己挑的、报告上印的）；
 # daypart = 患者只说得出「早上 / 晚上 / 半夜」这种时段，存的是该时段的代表时刻，

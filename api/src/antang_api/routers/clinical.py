@@ -20,6 +20,7 @@ from antang_api.routers.health_profile import read_health_profile
 from antang_api.schemas.auth import UserResponse
 from antang_api.schemas.clinical import ClinicalAccessStatus, ClinicalGlucose, ClinicalGlucoseSummary, ClinicalOverview, ClinicalPasswordRequest, ClinicalPatientPage, ClinicalScope, ClinicalUnlockRequest, ClinicalUnlockResponse
 from antang_api.schemas.glucose import GlucoseReadingResponse
+from antang_api.study import read_study
 
 router = APIRouter(tags=["clinical-workbench"])
 Auth = Annotated[AuthenticatedSession, Depends(get_authenticated_session)]
@@ -128,6 +129,7 @@ async def overview(patient_id: UUID, auth: Auth, session: Database, response: Re
     result = ClinicalOverview(
         patient=UserResponse.model_validate(patient), period_start=begin, period_end=finish,
         glucose=ClinicalGlucose(summary=ClinicalGlucoseSummary(count=count, average_mg_dl=round(float(average), 1) if average is not None else None, minimum_mg_dl=minimum, maximum_mg_dl=maximum), points=[GlucoseReadingResponse.model_validate(point) for point in points], truncated=count > len(points), limit=5000),
+        study=await read_study(session, patient_id, begin, finish),
         profile=await read_health_profile(session, patient_id),
         wearable=await read_wearable_dashboard(session, user_id=patient_id, period_start=begin, period_end=finish),
     )
