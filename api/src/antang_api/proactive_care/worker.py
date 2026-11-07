@@ -19,6 +19,7 @@ from antang_api.models import (
     ProactiveCareTaskKind,
     ProactiveCareTaskStatus,
 )
+from antang_api.proactive_care.behavior_dispatch import sweep_behavior_signals
 from antang_api.proactive_care.service import (
     has_scheduled_routine_replacement,
     schedule_routine_check_in,
@@ -36,14 +37,40 @@ class ProactiveCareWorker:
         *,
         process_task: TaskProcessor,
         sessions: async_sessionmaker[AsyncSession] = session_factory,
+        behavior_sweep_interval: timedelta = timedelta(minutes=10),
     ) -> None:
         self._process_task = process_task
         self._sessions = sessions
+        self._behavior_sweep_interval = behavior_sweep_interval
+        self._last_behavior_sweep: datetime | None = None
+
+    async def _sweep_behavior_signals(self, now: datetime) -> None:
+        """多久扫一次行为痕迹：它们不是急事，十分钟一次够用。
+
+        放在领取任务之前，所以刚扫出来的任务在同一轮就能被领走；扫不动不该
+        影响正常任务，出错只记日志。
+        """
+
+        if (
+            self._last_behavior_sweep is not None
+            and now - self._last_behavior_sweep < self._behavior_sweep_interval
+        ):
+            return
+        self._last_behavior_sweep = now
+        try:
+            async with self._sessions() as session:
+                created = await sweep_behavior_signals(session, now=now)
+                await session.commit()
+                if created:
+                    logger.info("行为痕迹排入 {} 个主动关怀任务", len(created))
+        except Exception:
+            logger.exception("扫描行为痕迹失败，下一轮再试")
 
     async def run_once(self, *, now: datetime | None = None) -> bool:
         """最多处理一项到期任务；完全没有可做的工作时返回 False。"""
 
         claimed_at = now or datetime.now(timezone.utc)
+        await self._sweep_behavior_signals(claimed_at)
         other_task = aliased(ProactiveCareTask)
         active_core_run = aliased(AgentRun)
         async with self._sessions() as session:

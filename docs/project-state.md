@@ -672,3 +672,333 @@ WHO-5 五项身心健康指数是**免版税**的（世界卫生组织，署名�
 - 顺手写了 `docs/next-steps.md`：把「每周次数还差手机控件、话题冷却与行为触发没做、用患者的话查数据只做了第一层、题库等授权、CASE/Think Twice 要先定图存储与两稿审计」一次写清，避免下一个人从零猜。
 - 部署：镜像 `antang-api:deploy-20261101-*`，线上 `/health` ok、`alembic_version = p5e6f7a8b9c0`、`psychosocial_assessments` 已有 `who5_percent` 列、`/psychosocial-instrument/who5` 路由 401（要求登录，说明注册上了）。
 - 推送踩坑：REST 推 12 个文件时 GitHub 回 400，拆成两次推又多出一个提交 → 写 `deploy/squash_remote_head.py` 用同样的树接回原父提交再强移 ref；另外 GitHub 只认 40 位完整 sha，传短 sha 会 `422 parents must be exactly 40 characters`。
+
+### 2026-11-01（三）：图存下来了，还得让模型用得上
+
+存了图不等于模型会往里写。这一步补的是「会用」：三个工具加一条提示词规则。
+
+- 三个工具（`api/src/antang_api/tools/case_graph.py`）：
+  - `record_case_node(layer, kind, text, intensity)`：念头一侧记情境/事件/念头/被他当成事实的想法，情绪一侧记情绪/身体感觉/冲动；`intensity` 1–5 **只给情绪**（念头填了会被 `add_node` 拒），`text` 尽量用他自己的话。返回 `node_id` 与中文 `label`，不让他看见 uuid。
+  - `connect_case_nodes(from_node_id, to_node_id, relation, note)`：四种关系各有固定的两侧（念头→念头 causes/supports、念头→情绪 triggers、情绪→情绪 soothes、情绪→情境 avoids）。连不上的组合由服务层拒绝并给出「该用哪种」的提示，而不是让模型换着连法硬凑。
+  - `read_case_graph(layer=None)`：把节点和边读出来，供连边或回看；`layer` 只看一层。
+  - 三个都是平铺参数（吃过「一层嵌套对象模型就不爱调」的亏），`source_message_id` 从这一轮的 `AgentRun.trigger_message_id` 反查，追得到是哪句话记的。
+- 注册三处：`tools/__init__.py` 的 `build_case_graph_tools`、`main.py` 的 `core_tools`（启动期那条「工具缺少活动阶段配置」会拦住漏配）、`chat.py` 的 `TOOL_ACTIVITY_PHASES`（记节点/连边 = `organizing`，读图 = `reading`）。
+- 提示词（`api/src/antang_api/agents/core.py`）加四条：说出具体的念头或感受就记；只有他自己说清因果才连边，没说清先只记节点；顺序不对被拒说明记错了，不是换连法；回看时说他的原话，不出现「节点」「图谱」「id」。
+- 顺手修的顺序问题：`graph_snapshot()` 原来只按 `created_at` 排，同一个事务里两条节点的时间可能一样，读出来顺序不稳 → 再加 `id`（uuidv7，本身带时序）兜底。
+- 测试 `api/tests/test_case_graph_tools.py` 5 例：念头与情绪各落各层且 `source_message_id` 指到本轮消息、念头带强度被拒且一条都没写、按他说的因果连成 `triggers`、别人的节点连不上、三个工具名不变。`test_case_graphs.py` 7 例仍过；`ruff`、`pyright` 干净。
+
+- 跟着上下文走（同一节续）：`render_case_graph_context()` 把最近 `CASE_GRAPH_CONTEXT_LIMIT = 12` 条念头/情绪排成一段「[他之前说过的念头和情绪]」，写清「只用来把话接住，不要念给他听、不要当成诊断结论、他没提起时别说『你上次说过』」；`chat.py` 每轮用 `graph_snapshot()` 读出来塞进 `render_core_system_prompt(case_graph_context=...)`，没记过就是空串、完全不会出现空段落。测试 `api/tests/test_case_graph_context.py` 三例（没记过不出现、只放最近 12 条、禁念给他的措辞在）。
+
+- 只读视图（同一节续）：`GET /health-profile/case-graph` 返回 `CaseGraphResponse{nodes, edges}`，节点带 `kind_label`（念头/情绪…）、边带 `relation_label`（触发/引出…）。**只有 GET**——节点是他原话说出来的，改和删都得他再说一次，所以接口不提供写入，界面也不给「编辑」按钮。测试 `test_case_graphs.py` 两例：有念头+情绪+一条触发边时标签与强度都对、什么都没说时两个列表都是空的。
+- 手机端只读卡（同一节续）：apps/mobile/src/psychosocial/CaseGraphSection.tsx 放在「心理」页最上面，标题「你和我说过的话」，一句「这里只读……要改，在对话里再说一次就行」；每条按层标「念头 / 情绪和身体」并带中文 kindLabel，情绪才显示「（强度 N/5）」；有边时底下列「A → 触发 → B」。测试 CaseGraphSection.test.tsx 四例（空态、强度只挂在情绪上、边两端是原话、只读文案在）。
+
+### 2026-11-02 深夜：世卫那五句上手机，选填但要么全答要么全空
+
+- 题库走自己的路由：`api/src/antang_api/client.ts` 的 `getWho5Instrument()` 打 `/api/v1/health-profile/psychosocial-instrument/who5`。**取不到就整块不显示**（`Promise.all` 里 `.catch(() => null)`），老后端不会因为一个选填问卷把整页打黑——与「字段只能加不能改名」是同一条教训。
+- 为什么搭在恐惧那份问卷里一起交：后端 `who5_answers` 不满足「要么逐题答案、要么两个百分比」，单独提交会被 422。所以它排在第七题之后，标题「这两周过得怎么样」，五句 0–5（一直…从未），跟着同一次 POST 走（`who5_answers`）。
+- **要么全答要么全空**：答了一半时保存按钮禁用，并写「上面那五句要么全答、要么全空着」——不让患者以为交上去半份也算。五句都没答就整个字段不传（`client.ts` 里 `...(input.who5Answers === undefined ? {} : {who5_answers})`）。
+- 题干、选项与出处说明都由服务端给（`disclaimer` 里写明「世界卫生组织五项身心健康指数」），换题不用重打包。
+- 测试：`PsychosocialSection.test.tsx` 加三例（五句全答 → `who5Answers` 五条且首条 `{cheerful, 5}`；只答一句 → 提示「还有 4 句没选」且保存禁用；读不到题库 → 整块不出现、主问卷照常）；`client.test.ts` 加两例（`getWho5Instrument` 打 `/who5` 且 `goldOptions` 可为空数组；带 `who5Answers` 时 body 有 `who5_answers`，不带时**没有这个键**）。
+- 顺手修掉上一节里 `pps/mobile` 的错字（应为 `apps/mobile`）。
+- 验证：移动端 **56 套 350 例**全过、`tsc --noEmit` 无输出、`expo lint` 干净。
+
+### 2026-11-02 深夜（二）：同一个话题，刚提过就不再提
+
+- 为什么加这一层：每周总量、夜间静默、连续没人回就降频，管的是「一共有多少」与「什么时候」。但同一件事连着两三天反复问，总量没超也还是「被盯着」。心率这类事件会自己反复出现（今天一段偏快、明天又一段），每次都问「你现在感觉怎么样」，很快就成了背景噪音——真正要紧的那一次反而被忽略。
+- 新文件 `api/src/antang_api/proactive_care/topics.py`：`TOPIC_COOLDOWN = timedelta(days=3)`；`topic_prefix(event_key)` 把 `版本:方向:时间` 折成 `版本:方向:`（时间是事件不是话题，同一方向才算同一话题）；`topic_cooldown_until(session, user_id=…, prefix=…, now=…)` 取该用户同前缀、`COMPLETED`、`finished_at` 最近的一条，返回 `finished_at + 3 天`，已过冷却期返回 `None`。
+- 闸门位置（`processor.py`）：健康事件分支里、`evaluate_heart_rate_shadow` 判定为候选之后，静默时段与额度检查之前。冷却期内 → `SCHEDULED`（`outcome_reason="topic_cooldown"`，`due_at=resumes_at`）并退还失败预算；若冷却结束已超过任务有效期 → `EXPIRED`（`topic_cooldown_expired`）。两处都直接 `commit` 返回，起草 Agent 不会被调用。
+- 范围刻意收窄，理由写在模块 docstring 里：日常问候有自己的间隔与额度，**计划回访是患者自己答应过的事**，压着不发等于我们毁约——这两类不进冷却；目前只有心率事件产生话题。
+- 患者回了话也不提前解除冷却：要挡的是提醒本身的密度，不是「他没理我」；把回话当成可以再发一次的许可，正好是最容易变成催促的写法。
+- 测试 `tests/proactive_care/test_topic_cooldown.py` 9 例：话题只保留版本与方向（高/低是两个话题）、五种读不出话题的键（`None`/空串/缺段/缺方向）；昨天提过的同话题要等到 `finished_at + 3 天`；别的方向、三十天前的旧事件、被 `SKIPPED` 的那次都不占用冷却；processor 层用 monkeypatch 换掉 `evaluate_heart_rate_shadow` 后跑一次 Worker——任务被推到 `due_at == finished_at + TOPIC_COOLDOWN`、`outcome_reason == "topic_cooldown"`、起草图 `calls == 0`。
+- 坑：`HeartRateShadowResult` 有 `received_at`/`age_years`/`context_complete`/`timezone`/`source_package`/`recording_method`/`minute_aggregation` 等必填字段，构造假结果只给 `decision`/`reason`/`event_key` 会 `ValidationError`（表现为任务被记成 `processor_error:ValidationError`）；`proactive_care_tasks.wearable_import_id` 是唯一的，一个任务要配一条自己的 `WearableImport`。
+- 验证：`tests/proactive_care` **121 passed**、`ruff` All checks passed、`pyright` 0 errors。
+
+### 2026-11-02 深夜（三）：血糖危险不危险，和他感觉到没有，分开记
+
+- 为什么分开：一张表只存一个「风险等级」，会把最要紧的一档压平——血糖 3.1 他毫无感觉，和血糖 4.2 他慌得不行，复盘时该练的东西完全相反（前者是察觉，后者是怕）。蓝图里把这件事叫「事件级双风险」，是下一版论文的创新点。
+- 新表 `risk_annotations`（迁移 `r7a8b9c0d1e2`，`down_revision = "q6f7a8b9c0d1"`）：`physiological_risk`（none / moderate / high）、`felt_risk`（none / some / strong）、`label`（both / silent / felt_only / neither，由前两列推出来）、`measured_at`、`glucose_reading_id`（可空，指到那条读数）、`source_message_id`、`note`。CHECK 把三个枚举都钉住，标签写错直接违约。
+- 生理风险怎么算（`api/src/antang_api/psychosocial/dual_risk.py`）：用**患者自己的目标范围**判「偏离」，用固定阈值判「危险」——`_CRITICAL_LOW_MG_DL = 54`（3.0）、`_CRITICAL_HIGH_MG_DL = 250`。目标范围是患者和医生定的，可能比通用 3.9–10.0 宽，拿它判紧急会漏掉真正危险的低值，所以两套标准各管一件事。
+- 感受风险不推断：只有患者这一轮说了感觉才记（`none` / `some` / `strong`），没说就先问一句。留空不是「没风险」，是「我们不知道」。
+- 工具 `record_dual_risk`（`api/src/antang_api/tools/dual_risk.py`，平铺五个参数：`felt_risk` 加 `value_mmol` / `glucose_reading_id` / `measured_at` / `note`）：要么给他报的数字，要么给已有那条读数的 id。**两个都没有就报错让他先把数字记下来**——不许拿一个感觉去猜生理风险。时间不带时区直接拒绝；别人的读数拒绝。
+- 上下文（`chat.py` 的 `dual_risk_context`）：最近 90 天他标过的时刻折成「10-30 03:10 血糖危险，他没感觉到」这类行，并写明「不要拿来当结论；他没提，就不要主动说『你上次没感觉到』」。
+- 提示词两条（`agents/core.py`）：①报数又说了感觉就调「记双风险」，只说数没说感觉先问一句——「3.0 以下却毫无感觉」这一档最危险也最容易漏；②两面不一致时说法要分开：低而不觉得要讲清马上处理、并提醒下次更低也可能察觉不到；不低却很怕就处理怕，不加重「我真的要低血糖了」。
+- 测试 `api/tests/test_dual_risk.py` 25 例：九个阈值边界（40/53 → high，54/69 → moderate，70/140/180 → none，181 → moderate，251 → high）、患者自设 80–160 时 78 算偏离、七种标签组合、非法档位报错、上下文行措辞、低值没感觉 → `silent` 且 `source_message_id` 指到这一轮消息、自设范围内但很怕 → `felt_only`、没给数字 → ValueError、时间缺时区 → ValueError、别人的读数 → ValueError、工具名与五个参数名固定。
+- 验证：`ruff` All checks passed、`pyright` 0 errors、`pytest` 全量 676 例——**671 passed**，5 例失败全是 Windows `asyncio.create_subprocess_exec` 的已知限制（`test_isolated_test_runner.py` 两例、`test_schema_branch_merge.py` 三例）。
+- 还没做：手机端没有「他标过的双风险」列表（只进模型上下文）；标签还没有进入主动关怀的语气选择；没有针对 `silent` 一档的专门随访计划。
+
+### 2026-11-02 深夜（四）：行为痕迹先算出来，但先不据此发消息
+
+- 先有文档再写代码：`docs/behavior-triggers.md` 把三个信号的定义、阈值、依据与「算错了会怎样」写清，避免又变成一套关键词规则（`AGENTS.md` 明令禁止用关键词假装做判断）。
+- 三个信号（`api/src/antang_api/proactive_care/behavior_signals.py`，全部只数次数与时间，不读聊天文字）：
+  - `repeated_check`：最近 24 小时里**同一段连续 3 小时内测了 ≥ 6 次**。按窗口而不是按天，是因为「一天 12 次分散在早中晚」和「两小时内 6 次」形状不同，后一种才是越测越慌。6 次是起始阈值：T1DM 常规建议每天 4–10 次，6 次/3 小时已经超出常规区间，上线后按真实分布校准。
+  - `exercise_avoidance`：最近 14 天里 `fear_behavior_logs.kind = 'exercise_avoidance'`（患者自己在对话里说过的）≥ 2 次。不从步数反推——步数下降可能是生病、下雨、通勤变了。
+  - `night_rechecking`：最近 3 个夜里 ≥ 2 个夜里各测了 ≥ 2 次，**按患者本地时区**判夜，窗口 00:00–05:00（05:00 之后混进正常起床）。
+- 只算不发：这一版没有接到主动关怀的发消息路径上，理由写在文档第三节——行为触发最容易变成指责，而且要加行为来源得动任务表「健康事件必须绑穿戴导入」的约束，是独立的一次迁移。现在只把 `render_behavior_signal_context()` 放进系统提示词，并写明「不要报次数、不要念成结论、他没提就先不说」。
+- 撤回与删除不算：血糖看 `revoked_at is null`，行为看 `deleted_at is null`。
+- 测试 `api/tests/proactive_care/test_behavior_signals.py` 13 例：六次集中三小时内命中、分散在早中晚不命中、五十分钟内五次不命中、两天前的不算、一次回避不算两次才算、两周外的回避不算、两个夜里各两次命中、每夜一次不算、05:30 算早晨不算夜里、库里拼起来的两条信号、撤回与删除都不算、别人的读数永不算、四个阈值常量与文档一致。
+- 还没做：不落库（每次现算，量小且没有「他看过这条候选」的状态需要记）；没有接进主动关怀的发送路径；没有做校准看板。
+
+### 2026-11-02 深夜（五）：行为痕迹接进发送路径——先过额度，再只提一次
+
+- 上一节把三条信号算出来了，但没有动作。这一节把它接到主动关怀的发送路径上：痕迹成立 → 排一条 `behavior_signal` 任务 → Worker 起草、Auditor 通过、照常推送。仍然**不**做患者可见的演示按钮或模拟开关。
+- 任务类型：`ProactiveCareTaskKind` 加 `BEHAVIOR_SIGNAL = "behavior_signal"`（迁移 `s8b9c0d1e2f3`，`down_revision = "r7a8b9c0d1e2"`）。「健康事件必须绑穿戴导入」的约束加第四支：`behavior_signal` 要求 `wearable_import_id`/`care_plan_id`/`care_plan_revision` 全空——行为痕迹来自血糖与行为记录，不属于某次穿戴导入。
+- 枚举值的坑：`kind` 是 PostgreSQL 枚举类型（`proactive_care_task_kind`），只改 CHECK 不够，必须 `ALTER TYPE ... ADD VALUE`。而 PostgreSQL 不允许在同一个事务里「加完枚举值立刻拿它去建约束」（`unsafe use of new value of enum type`），所以这一句必须放进 `with op.get_context().autocommit_block():`，CHECK 的删除与重建留在普通事务里。downgrade 先删掉 `behavior_signal` 任务行再收窄约束。
+- `api/src/antang_api/proactive_care/behavior_dispatch.py`：
+  - 话题键 `behavior:<kind>`（与心率事件的 `版本:方向:` 不同域），因此复用话题冷却：同类痕迹三天内只提一次。已在排序中或冷却中的话题直接跳过，不重复排队。
+  - `queue_behavior_signals` 给每条成立的信号排一条任务：`event_key = "behavior:<kind>"`、`evidence = signal.as_dict()`、`expires_at = now + 24h`；`due_at` 已经过期到 `now + TTL` 之后的直接丢——迟到的信号不如不发。
+  - `sweep_behavior_signals`：扫描范围限定「近 24 小时有过血糖读数」且 `health_events_enabled` 的用户（limit 50）。上限只按「本批先扫这么多」写，不做优先级排序——第一版数据量小，不值得为它引入更复杂的调度。
+- Worker（`worker.py`）：`behavior_sweep_interval = timedelta(minutes=10)`，`run_once` 开头跑一次扫描，失败只记日志不影响领任务——扫描坏了不应该让已经排好的消息也发不出去。
+- Processor（`processor.py`）：
+  - 新分支：开关关掉 → `CANCELLED`（`health_events_disabled`）；领到任务时**现算一遍**核对，痕迹已经不成立（例如刚被撤回）→ `SKIPPED`（`behavior_signal_gone`）。宁可少发一条，也不拿过期证据去问「你是不是又在反复测」。
+  - 额度闸门与日常问候共用：总量用完 → `EXPIRED`（`weekly_contact_limit_expired`），**不**像日常问候那样推迟到额度腾出来。理由：日常问候推迟只是晚一点，而行为痕迹是「这几天的形状」，推到三天后再说等于说错了话。
+  - 24 小时「最近刚聊过」的保护对行为任务不生效（它本来就是因为患者没聊、只在测才出现的），不重排、不查是否有日常问候替代。
+  - 提示词分支：`trigger` 带 `signal`/`signal_label`/`occurred`/`window_days`，`never_mention_counts: True`——可以说「这几天测得比平时密」，不许说「你测了 8 次」。
+- 测试 `api/tests/proactive_care/test_behavior_dispatch.py` 6 例：成立即排队、同话题只排一条、昨天提过的不再排、扫描只看近 24 小时且只碰开关开着的用户、痕迹消失 → `SKIPPED`、额度用完 → `EXPIRED` 且起草没被调用。
+- 测试环境坑（值得记）：这些用例会真写用户与任务并提交，别的用例的 Worker 会把留下的任务领走，然后在**别人的断言**里失败——看起来像新功能坏了。处理办法是插件化的：新文件加 autouse fixture 删掉自己造的用户（级联删除任务与读数），processor 用例里的 Worker 用 `behavior_sweep_interval=timedelta(days=1)` 关掉扫描。
+- 验证：`tests/proactive_care` **140 passed**、后端全量 **690 passed**（5 例失败是 Windows 上 `asyncio.create_subprocess_exec` 的已知限制）、`ruff` All checks passed、`pyright` 0 errors。
+- 还没做：手机端没有「为什么这次问你」的说明；没有把 `silent` 档（血糖危险但没感觉）与行为痕迹连起来；阈值仍待真实数据校准；扫描上限 50 是按「先扫这么多」写的，没有优先级。
+
+### 2026-11-05：先说清「这次为什么是我开口」
+
+- 患者看到的主动关怀消息与普通回答长得一样：都在「关怀消息」那段会话里，语气也一样。读者没法判断「这是他主动问的，还是我先说的」，想问一句「为什么」也没处问。这一节把原因做成消息上的一个字段。
+- 数据：`messages.proactive_reason`（`String(120)` 可空，迁移 `t9c0d1e2f3a4`，`down_revision = "s8b9c0d1e2f3"`）。患者自己开的对话永远为空——只有程序排出来的主动关怀才写。
+- 谁来写：`api/src/antang_api/proactive_care/reasons.py` 的 `message_reason(task)`，按任务来源给固定句子：
+  - 日常问候「到了我们平时说说话的时间」；计划回访「你答应过这时候回来说一声」（提醒的是他自己的承诺，不是我们在催）。
+  - 心率事件按 `health_evidence["direction"]` 给「刚才有一段心率偏高 / 偏低」，方向不明时「和平时不太一样」。
+  - 行为痕迹单独一套：`repeated_check`「这几天测得比平时密」、`exercise_avoidance`「你最近好像在躲着运动」、`night_rechecking`「这几个夜里你常常醒」；不认识的信号退到「这几天的记录有点不一样」。
+  - 刻意**不**复用 `behavior_signals.SIGNAL_LABELS`：那些是给模型看的口径（含「三小时」「14 天」这类窗口与条件），患者不需要也知道窗口是几天；这里要的是他自己能认出来的一句话。
+- 不许带数字：测试里逐类断言句子里没有阿拉伯数字、没有「次」。数值是证据，放在任务证据里；写进患者眼前这一行就变成了被盯着的感觉。
+- 写入位置：`processor.py` 落消息时 `proactive_reason=message_reason(task)`，与正文同一次提交。它不经过模型，也不允许 Auditor 改——原因句讲的是「为什么排这条任务」，模型并不知道调度的事。
+- 出口：`ChatMessageResponse.proactive_reason`（`schemas/chat.py`，`None` 默认，旧客户端不受影响）。手机端 `ChatMessage.proactiveReason`，历史解析时缺字段按 `null` 处理（兼容老服务端）。
+- 手机端：`ChatScreen.tsx` 在气泡上方加一行小字「这次是我先开口 · 到了我们平时说说话的时间」，`accessibilityLabel` 读全句；`chat-state.ts` 里本地生成的收发消息一律 `proactiveReason: null`。
+- 顺带修一处会静默吞掉通知的：`parseProactiveCareNotificationData` 原来只认 `routine_check_in` / `plan_follow_up` / `health_event`，新加的行为信号推送会被判「kind 无效」直接抛错、点进来什么也不发生。现在四种都收，测试单独钉住。
+- 测试：`api/tests/proactive_care/test_message_reason.py` 12 例（含每类都有话说、不认识的来源退到中性、句子里没有数字与「次」），`test_processor.py` 里那条已发消息断言 `proactive_reason == ROUTINE_REASON` 而患者自己的消息为 `None`；手机端 `types.test.ts` 覆盖「缺字段按 null」与行为信号通知，`ChatScreen.test.tsx` 断言那行小字只出现一次。
+- 验证：后端全量 **702 passed**（5 例失败仍是 Windows 上 `asyncio.create_subprocess_exec` 的已知限制）、`ruff` All checks passed、`pyright` 0 errors；手机端 `tsc --noEmit` 无输出、相关 4 套 45 例全过。
+- 还没做：原因句是固定文案，不随「这次具体看到了什么」变化；推送正文里还没带原因（只有对话页里能看到）；`silent` 档与行为痕迹仍各自独立。
+- 已部署（2026-11-05 20:15）：镜像 `antang-api:deploy-20261105-201533`，`/health` 返回 `{"status":"ok","mode":"full"}`，`alembic_version = t9c0d1e2f3a4`；`messages.proactive_reason` 列与 `proactive_care_task_kind` 的 `behavior_signal` 值都已在线。部署日志：`/tmp/antang-deploy.log`；核对脚本 `D:\deepseek-harness\deploy\verify_reason_deploy.sh`。
+
+### 2026-11-05（二）：原因句从「哪一类事实」改成「哪一天哪一段」
+
+- 上一版每类任务只有一句固定的话，读起来像模板：同一句话在任何一天都成立，也就等于没有提供信息。这一版把「什么时候」装进去，但仍然不装次数与数值：
+  - 日常问候：`早上/上午/中午/下午/傍晚/晚上这会儿，我们平时会聊几句`；深夜（22 点后、5 点前）退回「到了我们平时说说话的时间」——那个点我们本来就不说话，硬说「这会儿」是假的。
+  - 计划回访：`你答应过今天/昨天/前天回来说一声`（按 `due_at` 的本地日期）。
+  - 心率事件：`今天下午手环记录里有一段心率偏高`，时间取 `sample_start`（缺失时退到 `received_at`，都没有就不带时间）。
+  - 行为痕迹：`今天下午有一段时间测得比平时密`（取 `latest`）；回避运动与夜里反复确认的句子本身就是窗口（「最近两周」「这几天的夜里」），不再叠日期词。
+- 粒度只到「哪天 + 哪个时段」，**不给钟点**：精确到分钟会让人以为我们在实时盯着他，而它其实是一段数值的汇总。
+- 凌晨 0–5 点算「昨天夜里」：否则凌晨三点说「今天夜里」，患者会以为我们在说以后。
+- 时间按 `proactive_care_settings.timezone` 转换（`processor.py` 落消息时把 `live_settings.timezone` 传进去），不是服务器时区。
+- 为什么不做成「随机的关心」：随机话术会让人反复检查（可变比率强化），我们已经在固定整点那一节写过这个反例。这里变的是**事实的时间锚点**，确定性映射、可测可审；不是措辞的随机。
+- 测试 `tests/proactive_care/test_message_reason.py`（重写）17 例：早上那句、深夜退回、计划回访的日期词、昨天深夜、凌晨两点算昨天夜里、没有时间也能说、未知方向不编方向、三类行为信号、密集测量带时段、四类任务都不含数字与「次」、同一任务同一时刻两次结果一致。
+- 验证：`tests/proactive_care` 全部通过（`test_message_reason` 17 + `test_processor` 22 共 39 例先跑）；`ruff` All checks passed；后端全量 707 passed（5 例仍是 Windows 上 `asyncio.create_subprocess_exec` 的已知限制）。
+- 已部署（2026-11-05 20:55）：镜像 `antang-api:deploy-20261105-205114`，`/health` 返回 `{"status":"ok","mode":"full"}`；容器内 `reasons.py` 已含新句、`processor.py` 两处传入 `timezone_name`。本次无迁移，`alembic_version` 仍是 `t9c0d1e2f3a4`。
+
+### 2026-11-05（二）：「血糖多少」和「当时有没有感觉」并排放到他自己页面上
+
+事件级双风险的写入早就有了（10-02 的 `risk_annotations` + `record_dual_risk` 工具），
+但他自己看不到——只能在对话里听着我们说。这一节把它变成一张只读卡。
+
+- 接口 `GET /api/v1/health-profile/dual-risk`（`routers/health_profile.py`）：最近 30 天、
+  逐条、最新在上、上限 60 条。不返回任何汇总（次数、比例、档位分布都不给）。
+  句子由服务端给（`label_text`），但用**第二人称**：`PATIENT_LABEL_LABELS` 里是
+  「血糖偏离得厉害，你没觉得」，模型上下文里的 `LABEL_LABELS` 仍是第三人称
+  「他没感觉到」。同一个标签两套说法是有意的：他页面上的句子不能像在说别人。
+- 标注里单独存一份数字：`risk_annotations.value_mg_dl`（迁移 `u1d2e3f4a5b6`，
+  可空 + CHECK 20–600，回填从 `glucose_readings` 取）。原来只存外键，读数一撤回
+  或删除，「当时血糖 3.2」就跟着没了，只剩没头没尾的「血糖低」。
+- 手机端 `apps/mobile/src/psychosocial/DualRiskSection.tsx`：标题「血糖和你的感觉」，
+  每行左侧一道色条（橙色 = 血糖偏了但他没觉得，蓝色 = 血糖不算偏但他很难受），
+  行里只留句子与「时间 · 3.2 mmol/L」，底部说明「不打分，也不给建议」。空态直接
+  告诉他怎么说会被记下来。同时把已经写好但一直没挂上去的 `CaseGraphSection`
+  也挂到心理页——之前它只有测试，界面上根本看不到。
+- 验证：后端 `tests/test_dual_risk.py` 28 例（新增三条：数字单独留、只给自己最近
+  30 天、空列表）；`ruff` 干净、`pyright` 0 errors；手机端 `src/psychosocial` 与
+  `src/api/client.test.ts` 全过，`tsc --noEmit` 无输出。
+- 还没做：把 `silent` 一档接进主动关怀的语气（现在只在系统提示词里作为背景）；点
+  一行回到那天记录的跳转。
+
+### 2026-11-05（三）：知道「他低下去却没感觉」之后，先问身体
+
+双风险那张卡只是给他自己看的记录；主动关怀起草时其实也拿到了这些标注（`dual_risk_context`），
+但提示词里只写了「不要拿来当结论」，没有说明该拿它做什么。结果是：他知道这个人有察觉问题，
+发出去的话仍然是「今天血糖怎么样」。
+
+这次把这一档单独挑出来，作为 `sensation_context` 放进主动关怀的输入：
+
+- 只挑 `silent`（血糖偏离、他当时没觉得），90 天内最近 3 条，带日期时段与当时的数值；
+- 提示词明确：这时该问的是身体的感觉（出汗、心慌、发虚、没劲），不要先问数值；
+  不要把次数念给他，也不要拿「注意低血糖」顶上去——这句话他早就听过很多遍；
+- `sensation_context` 为空时**不**反过来推断他察觉正常：没有记录不等于没有问题。
+
+没做汇总、没做「察觉能力评分」：心里发紧换成百分比，和把记录变成任务是一回事。
+
+### 2026-11-06：点一行，回到那天的记录
+
+「血糖和你的感觉」是只读的，患者看完往往还想看当天还记了什么（吃过什么、打了多少）。
+之前这一页只停在「点不动」，要自己去「记录」页翻日期。现在每一行都能点：切到记录页，
+自动把读数窗口放宽到包住那一天，并在列表里把最接近的那条圈出来。
+
+实现上说清三处小决定：
+
+- **按最近一条匹配，不要求分秒相等**：对话里说「刚才 3.2」和库里落下的 `measured_at`
+  常差几十秒，严格相等会「点了却什么也没高亮」。相差十分钟以内都算同一次，多条取最近。
+- **读数窗口临时放宽**：默认 14 天，点 20 天前那条时按 `daysAgo + 2` 请求（接口上限 90）。
+  放宽只影响这一轮请求，不改变记录页平时的默认窗口。
+- **找不到就直说**：那条读数被撤回或删掉时，顶部写「那次没找到读数，可能已经删掉了」，
+  不静默失败，也不假装高亮别的条目。顶部那一句可以按「×」收起来。
+
+顺带：落到的那条如果来自报告/传感器导入，自动切到「传感器」子栏——否则高亮在另一栏，
+患者看到的是「顶上说这是那次记录，列表里却没有」。
+
+验证：手机端 `src/navigation/record-screen.test.tsx` 全过（新增三条：落到 20 天前那次、
+找不到时的说法、取消定位），`src/psychosocial/DualRiskSection.test.tsx` 新增两条
+（点一行把那一刻交出去、没有回调时不出现「点一行」）；`tsc --noEmit` 无输出、`expo lint` 干净。
+
+### 2026-11-07：把待办清单上剩下的活一次做完
+
+这一批不是一件事，而是清单上剩下的一整串。放在一起记，因为它们有一个共同点：
+**先把「怎么算做对了」写下来，再写代码**——三处都配了可复现的评测或回归集。
+
+一、运动与睡眠的手动补录（`activity_logs` / `sleep_logs`，迁移 `v2e3f4a5b6c7`）。
+睡眠用「几点睡、几点醒」两个时间点，不让他填时长；醒来早于入睡直接 422。
+手填与手环导入**分开存、不互相覆盖**，卡片上写明这件事——合并成一条看起来更整洁，
+但会让人分不清哪个是自己记的。工具 `record_activity` / `record_sleep` 能回填
+30 天内（太多就是补数据，不是记录今天），未来时间拒绝。
+
+二、双风险的「几天后再问一次」（迁移 `w3f4a5b6c7d8`）。只有 `silent` 一档会排
+回访：血糖偏了他却没感觉，这件事值得三天后再问一句「后来怎么样」。补记十几天的
+旧事不排——那不是在关心当下，是在补作业。标注被删、或已经不算 silent，任务就作废。
+原因句刻意不带次数与数值，只说「那天低了却没什么感觉」。
+同时给规则层配了 26 条评测（`api/evals/dual_risk/`）：阈值 54/250 的两侧、宽目标、
+补糖反跳、以及「血糖不算低但他很怕」这种非危险时刻。跑出来三项都是 1.000，
+**但这只是回归保护**：标签是同一个人按同一套规则标的，真要验证效度得两人盲标算 Kappa，
+这句话也写进了 README，免得以后被人当成「已验证」。
+
+三、行为信号的校准窗口（迁移 `x4a5b6c7d8e9`）。阈值是按公开研究定的，没在真人身上
+校过，所以有了 `behavior_calibration_until`：开一段只记不发的窗口，窗口里每条命中
+都落进 `behavior_signal_records`（`dispatched=false`、原因 `calibration`），
+到期自动恢复。这条设计的要点是**记录的东西和真发时一样**，否则校准完了也没法比较。
+同一批还把 `silent` 档与行为痕迹连起来（`silent_lows_30d` 进 `health_evidence`），
+提示词允许说「你以前有几次低了都没感觉到」，但接着问的是他在担心什么，不是劝他少测。
+
+四、两稿的第二稿（Think Twice 生成侧）。第一稿定内容，第二稿只改措辞；
+`refine_wording()` 每轮用 `ensure_same_numbers` 核一遍，改数字就换一稿，
+两轮都不行退回第一稿——**退回不是失败**，第一稿本来就能发。健康事件那类固定事实句
+不走这一步：把服务器拼好的句子交给另一个模型重写，收益为零，风险不是零。
+评测集 `api/evals/two_draft/` 16 条，包括 `7.20` 与 `7.2`、全角数字、单位换算，
+以及「中文数字看不见」这个缺口（故意留一条钉在明处）。
+
+五、主动关怀给一件具体的小事（`proactive_care/actions.py`）。五条微行动，
+按来源选一条：没有感觉的低血糖 → 口袋里放糖；夜里反复醒 → 床头放饼干；
+测得比平时密 → 想测时先等十分钟；回避运动 → 饭后找人一起走；双风险回访 →
+今晚找一个人说一句。一次只给一条：一次说五件等于把清单丢给他，做完一件才算数。
+
+六、用他的话说他的血糖（`health_profile/query_parse.py` + 工具
+`find_glucose_readings`）。工具参数只有「原样抄患者的说法」，解析在服务端做：
+「上周三晚饭前」「上周一到上周五」「最近三天的夜里」都能落到具体的 `[start, end)`
+与场景集合。夜里跨天算成「第一天 00:00 到最后一早 05:00」，所以「最近三天的夜里」
+真是三个夜，不是三天里 0–5 点的七个小时。认不出日子就让他再说一遍，
+**绝不悄悄换成最近七天**——那会让他以为我们答的是他问的那次。
+评测集 `api/evals/glucose_query/` 18 条，三项都是 1.000。
+
+七、用图决定问什么（`graphs.choose_focus()`）。图此前只是背景（进上下文、给他看），
+现在它会挑一条：从最近 20 个节点里选他没在这次对话里提过的，先情绪、再念头。
+提示词要求问得具体但不引原话、不说「你上次说过」；他不想聊就换回普通问候。
+这一步才是「图驱动干预」，没有它，图就是一个漂亮的存档。
+
+八、顺手修的：`CaseGraphSection` 从 11-01 起只有测试、从未挂到任何界面——
+这次接进心理页时才发现。教训：**写完组件要问「谁渲染它」**，测试能过不代表用户看得见。
+
+### 2026-11-07：把待办清单上剩下的活一次做完
+
+这一批不是一件事，而是清单上剩下的一整串。放在一起记，因为它们有一个共同点：
+**先把「怎么算做对了」写下来，再写代码**——三处都配了可复现的评测或回归集。
+
+一、运动与睡眠的手动补录（`activity_logs` / `sleep_logs`，迁移 `v2e3f4a5b6c7`）。
+睡眠用「几点睡、几点醒」两个时间点，不让他填时长；醒来早于入睡直接 422。
+手填与手环导入**分开存、不互相覆盖**，卡片上写明这件事——合并成一条看起来更整洁，
+但会让人分不清哪个是自己记的。工具 `record_activity` / `record_sleep` 能回填
+30 天内（太多就是补数据，不是记录今天），未来时间拒绝。
+
+二、双风险的「几天后再问一次」（迁移 `w3f4a5b6c7d8`）。只有 `silent` 一档会排
+回访：血糖偏了他却没感觉，这件事值得三天后再问一句「后来怎么样」。补记十几天的
+旧事不排——那不是在关心当下，是在补作业。标注被删、或已经不算 silent，任务就作废。
+原因句刻意不带次数与数值，只说「那天低了却没什么感觉」。
+同时给规则层配了 26 条评测（`api/evals/dual_risk/`）：阈值 54/250 的两侧、宽目标、
+补糖反跳、以及「血糖不算低但他很怕」这种非危险时刻。跑出来三项都是 1.000，
+**但这只是回归保护**：标签是同一个人按同一套规则标的，真要验证效度得两人盲标算 Kappa，
+这句话也写进了 README，免得以后被人当成「已验证」。
+
+三、行为信号的校准窗口（迁移 `x4a5b6c7d8e9`）。阈值是按公开研究定的，没在真人身上
+校过，所以有了 `behavior_calibration_until`：开一段只记不发的窗口，窗口里每条命中
+都落进 `behavior_signal_records`（`dispatched=false`、原因 `calibration`），
+到期自动恢复。这条设计的要点是**记录的东西和真发时一样**，否则校准完了也没法比较。
+同一批还把 `silent` 档与行为痕迹连起来（`silent_lows_30d` 进 `health_evidence`），
+提示词允许说「你以前有几次低了都没感觉到」，但接着问的是他在担心什么，不是劝他少测。
+
+四、两稿的第二稿（Think Twice 生成侧）。第一稿定内容，第二稿只改措辞；
+`refine_wording()` 每轮用 `ensure_same_numbers` 核一遍，改数字就换一稿，
+两轮都不行退回第一稿——**退回不是失败**，第一稿本来就能发。健康事件那类固定事实句
+不走这一步：把服务器拼好的句子交给另一个模型重写，收益为零，风险不是零。
+评测集 `api/evals/two_draft/` 16 条，包括 `7.20` 与 `7.2`、全角数字、单位换算，
+以及「中文数字看不见」这个缺口（故意留一条钉在明处）。
+
+五、主动关怀给一件具体的小事（`proactive_care/actions.py`）。五条微行动，
+按来源选一条：没有感觉的低血糖 → 口袋里放糖；夜里反复醒 → 床头放饼干；
+测得比平时密 → 想测时先等十分钟；回避运动 → 饭后找人一起走；双风险回访 →
+今晚找一个人说一句。一次只给一条：一次说五件等于把清单丢给他，做完一件才算数。
+
+六、用他的话说他的血糖（`health_profile/query_parse.py` + 工具
+`find_glucose_readings`）。工具参数只有「原样抄患者的说法」，解析在服务端做：
+「上周三晚饭前」「上周一到上周五」「最近三天的夜里」都能落到具体的 `[start, end)`
+与场景集合。夜里跨天算成「第一天 00:00 到最后一早 05:00」，所以「最近三天的夜里」
+真是三个夜，不是三天里 0–5 点的七个小时。认不出日子就让他再说一遍，
+**绝不悄悄换成最近七天**——那会让他以为我们答的是他问的那次。
+评测集 `api/evals/glucose_query/` 18 条，三项都是 1.000。
+
+七、用图决定问什么（`graphs.choose_focus()`）。图此前只是背景（进上下文、给他看），
+现在它会挑一条：从最近 20 个节点里选他没在这次对话里提过的，先情绪、再念头。
+提示词要求问得具体但不引原话、不说「你上次说过」；他不想聊就换回普通问候。
+这一步才是「图驱动干预」，没有它，图就是一个漂亮的存档。
+
+八、顺手修的：`CaseGraphSection` 从 11-01 起只有测试、从未挂到任何界面——
+这次接进心理页时才发现。教训：**写完组件要问「谁渲染它」**，测试能过不代表用户看得见。
+
+### 2026-11-07（三）：截图不再靠手画，HFS-II 的中文条目也有了线索
+
+**真渲染截图（工程债，补完）**
+
+之前给心理页与记录页的「示意图」是 PIL 画出来的，数字与文案都得手抄，改一次界面就要重画一次。
+这一版换成了真渲染：`react-native-web` + `esbuild` 把 `MindScreen` / `RecordScreen` 这两个真实组件
+渲成网页，headless Chrome 截长图。
+
+- 管线在 `D:\deepseek-harness\deploy\web-preview\`（独立 scratch 工程，**不进产品仓**，产品代码一行没改）。
+  跑法与七个坑写在同目录 `README.md`。
+- 产物：`reports/assets/preview-real-screens.png`（心理页 + 记录页并排）、`preview-mind-real.png`
+  （心理页整页：双风险三行、只读图卡、沟通方式七题 + Gold、WHO-5 五句）、`preview-records-real.png`
+  （记录页「运动」：等宽页签、补录表单、手环卡）。
+- 三个坑值得记：①**Edge 的 headless 在这台机器上是坏的**（renderer 起不来，连 probe 页都 30 秒被杀），
+  换 Chrome 一次通过；②`react-native-web` 会把 `react` 拉到 19.3.1，而 `react-dom` 停在 19.1.0 时报
+  `Minified React error #527`，两个必须同版本；③esbuild 把 CJS 转 ESM 时只拷贝自有可枚举键，
+  所以 stub 掉的 Expo 模块**必须显式列出命名导出**，纯 Proxy 会让 `requireOptionalNativeModule`
+  变成 undefined——这类错误只在运行时出现，类型检查拦不住。
+- 夹具（血糖读数、双风险、图节点、手环数字）是编的；文案、排版、层级是客户端真实的样子。
+
+**HFS-II：拿到了中文条目线索，但没有拿到授权**
+
+用户提供了两条线索：问卷星 `https://www.wjx.cn/vm/QuA9mzI.aspx`（一份带人口学与临床信息的
+HFS-2 调查）与百度文库同款转载。
+
+- 读下来能确认的结构：行为量表 15 条、忧虑量表 18 条、每条 0–100 刻度、回忆期 6 个月；
+  附带「近 6 个月有无症状性 / 无症状性 / 严重低血糖」三道题与预防、处理能力的 1–5 自评。
+- **但这两份都不是授权**：HFS-II 题目有版权，中文译本另有翻译权；问卷作者不是版权方，文库那份是
+  转载。因此照抄进产品、或对外宣称「HFS-II 中文版」，仍然不行。
+- 已写 `antang/docs/research/hfs2-structure-and-licensing.md`：结构事实、与我们自编 6+1 题的
+  覆盖差异、换过去的代价（33 条 × 0–100 与低打扰设计的冲突、切点失效、历史分数要按 `instrument`
+  分段）、授权问询要点。**只记结构与类别，不抄条目原文**。
+- 顺带确认了一件对设计有用的事：那份问卷把「无症状性低血糖」单独问了一遍，与我们的 `silent`
+  双风险通道是同一件事——这条路不依赖量表授权，可以继续做。
+
+**gitee 镜像（仍阻塞）**
+
+2026-11-07 再试一次：没有凭据（`GCM_INTERACTIVE=never` + `git credential fill` 退出 128），
+匿名 fetch 正常、push 无门。三条可选路径写在 `next-steps` 第四节，等用户给令牌或手动登录。

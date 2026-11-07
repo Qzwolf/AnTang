@@ -104,6 +104,10 @@ class Message(Base):
 
     content: Mapped[str] = mapped_column(Text)
 
+    # 主动关怀发出来的消息带一句「这次为什么是我先开口」，由程序写死、给手机端显示。
+    # 患者自己开的对话永远为空。
+    proactive_reason: Mapped[str | None] = mapped_column(String(120))
+
     # 最终回答实际引用的网页快照。详细工具结果仍保存在 agent_tool_calls。
     sources: Mapped[list[dict[str, str]]] = mapped_column(
         JSONB,

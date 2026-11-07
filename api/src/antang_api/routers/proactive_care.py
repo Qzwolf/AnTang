@@ -28,6 +28,7 @@ from antang_api.routers.auth import (
 )
 from antang_api.proactive_care.service import schedule_routine_check_in
 from antang_api.schemas.proactive_care import (
+    BehaviorCalibrationRequest,
     ProactiveCareSettingsPayload,
     PushInstallationRequest,
 )
@@ -151,6 +152,48 @@ async def put_care_settings(
         after=datetime.now(timezone.utc),
         reset_existing=previous_cadence != request.routine_cadence,
         realign_existing=previous_check_in_hour != request.check_in_hour,
+    )
+    await session.commit()
+    return await _with_budget(
+        session,
+        care_settings=care_settings,
+        user_id=authenticated.user.id,
+    )
+
+
+@router.put(
+    "/behavior-calibration",
+    response_model=ProactiveCareSettingsPayload,
+)
+async def put_behavior_calibration(
+    request: BehaviorCalibrationRequest,
+    authenticated: Annotated[
+        AuthenticatedSession,
+        Depends(get_authenticated_session),
+    ],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ProactiveCareSettingsPayload:
+    """开始一段只记不发的校准期；`days=0` 立刻结束。
+
+    阈值是我按公开研究定的，没在真人身上验证过。先记一周、一条都不发，看它本来会
+    触发几次：如果一周十几次，那不是他的问题，是阈值的问题。校准期内命中的每一条
+    都会落进 `behavior_signal_records`，`dispatched=false`。
+    """
+
+    await lock_user_conversation(session, authenticated.user.id)
+    care_settings = await session.scalar(
+        select(ProactiveCareSettings)
+        .where(ProactiveCareSettings.user_id == authenticated.user.id)
+        .with_for_update()
+    )
+    if care_settings is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="主动关怀设置不存在",
+        )
+    now = datetime.now(timezone.utc)
+    care_settings.behavior_calibration_until = (
+        None if request.days == 0 else now + timedelta(days=request.days)
     )
     await session.commit()
     return await _with_budget(

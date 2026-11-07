@@ -6,6 +6,7 @@ from zoneinfo import available_timezones
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     StringConstraints,
     field_serializer,
     field_validator,
@@ -56,6 +57,8 @@ class ProactiveCareSettingsPayload(BaseModel):
     check_in_hour: int | None = None
     auto_paused: bool = False
     auto_downgraded_at: datetime | None = None
+    # 行为痕迹的校准期：这段时间内只记录「本来会发」，不真发。空 = 没在校准。
+    behavior_calibration_until: datetime | None = None
 
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
@@ -92,6 +95,16 @@ class ProactiveCareSettingsPayload(BaseModel):
     @field_serializer("quiet_hours_start", "quiet_hours_end", when_used="json")
     def serialize_quiet_time(self, value: time) -> str:
         return value.strftime("%H:%M")
+
+
+class BehaviorCalibrationRequest(BaseModel):
+    """开启/结束行为痕迹的校准期。
+
+    `days=0` 就是立刻结束校准、恢复真发。上限 30 天：校准是过渡办法，不是永久
+    的「只记账不说话」——一直不发，就等于这套东西没上线。
+    """
+
+    days: Annotated[int, Field(ge=0, le=30)]
 
 
 class PushInstallationRequest(BaseModel):

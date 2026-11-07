@@ -46,6 +46,10 @@ import {
   type ApplicationStatus,
   type RegistrationOptions,
   type PsychosocialProfile,
+  type CaseGraph,
+  parseCaseGraph,
+  type DualRiskEntry,
+  parseDualRiskEntries,
   parsePsychosocialProfile,
   type PsychosocialAssessmentInput,
   type PsychosocialInstrument,
@@ -86,6 +90,16 @@ import {
   parseCgmImportResult,
   parseCgmSeries,
 } from "./types";
+import {
+  parseActivityLogEntry,
+  parseActivityLogs,
+  parseSleepLogEntry,
+  parseSleepLogs,
+  type ActivityIntensity,
+  type ActivityKind,
+  type ActivityLogEntry,
+  type SleepLogEntry,
+} from "./logs";
 
 export type FetchFunction = (
   input: string | URL,
@@ -1083,6 +1097,86 @@ export class ApiClient {
     if (!response.ok) throw await this.apiError(response);
   }
 
+  async getActivityLogs(days = 7, signal?: AbortSignal): Promise<ActivityLogEntry[]> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/activity-logs?days=${days}`,
+      { signal },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseActivityLogs(await responseJson(response));
+  }
+
+  async recordActivityLog(input: {
+    performedAt: string;
+    kind: ActivityKind;
+    minutes: number;
+    intensity: ActivityIntensity;
+    note?: string | null;
+  }): Promise<ActivityLogEntry> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/activity-logs",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          performed_at: input.performedAt,
+          kind: input.kind,
+          minutes: input.minutes,
+          intensity: input.intensity,
+          ...(input.note === undefined ? {} : { note: input.note }),
+        }),
+      },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseActivityLogEntry(await responseJson(response));
+  }
+
+  async deleteActivityLog(id: string): Promise<void> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/activity-logs/${id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+  }
+
+  async getSleepLogs(days = 7, signal?: AbortSignal): Promise<SleepLogEntry[]> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/sleep-logs?days=${days}`,
+      { signal },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseSleepLogs(await responseJson(response));
+  }
+
+  async recordSleepLog(input: {
+    fellAsleepAt: string;
+    wokeAt: string;
+    note?: string | null;
+  }): Promise<SleepLogEntry> {
+    const response = await this.authorizedFetch(
+      "/api/v1/health-profile/sleep-logs",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fell_asleep_at: input.fellAsleepAt,
+          woke_at: input.wokeAt,
+          ...(input.note === undefined ? {} : { note: input.note }),
+        }),
+      },
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseSleepLogEntry(await responseJson(response));
+  }
+
+  async deleteSleepLog(id: string): Promise<void> {
+    const response = await this.authorizedFetch(
+      `/api/v1/health-profile/sleep-logs/${id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw await this.apiError(response);
+  }
+
   /**
    * 导出患者自己的全部记录。返回原文 + 服务器给的 content-disposition，
    * 文件名解析、落盘与分享交给调用方，这样 API 层不依赖 expo-file-system。
@@ -1146,12 +1240,43 @@ export class ApiClient {
     return parsePsychosocialInstrument(await responseJson(response));
   }
 
+  /**
+   * 世界卫生组织五项身心健康指数（WHO-5）的题库。
+   *
+   * 与恐惧那份题库分开取：老后端没有这条路由，取不到就不显示这一块，
+   * 不能因为一个选填的附加问卷把整页打黑。
+   */
+  async getWho5Instrument(): Promise<PsychosocialInstrument> {
+    const response = await this.authorizedFetch(
+      '/api/v1/health-profile/psychosocial-instrument/who5',
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parsePsychosocialInstrument(await responseJson(response));
+  }
+
   async getPsychosocialAssessment(): Promise<PsychosocialProfile | null> {
     const response = await this.authorizedFetch(
       '/api/v1/health-profile/psychosocial-assessment',
     );
     if (!response.ok) throw await this.apiError(response);
     return parsePsychosocialProfile(await responseJson(response));
+  }
+
+  async getCaseGraph(): Promise<CaseGraph> {
+    const response = await this.authorizedFetch(
+      '/api/v1/health-profile/case-graph',
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseCaseGraph(await responseJson(response));
+  }
+
+  /** 他自己标过的「血糖多少 × 当时有没有感觉」，最近 30 天，只读。 */
+  async getDualRiskEntries(): Promise<DualRiskEntry[]> {
+    const response = await this.authorizedFetch(
+      '/api/v1/health-profile/dual-risk',
+    );
+    if (!response.ok) throw await this.apiError(response);
+    return parseDualRiskEntries(await responseJson(response));
   }
 
   async recordPsychosocialAssessment(
@@ -1168,6 +1293,9 @@ export class ApiClient {
           gold_score: input.goldScore,
           instrument: input.instrument,
           assessed_at: input.assessedAt,
+          ...(input.who5Answers === undefined
+            ? {}
+            : { who5_answers: input.who5Answers }),
         }),
       },
     );

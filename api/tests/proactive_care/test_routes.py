@@ -143,6 +143,40 @@ async def test_the_patient_can_choose_how_often_we_may_check_in(
         assert refused.status_code == 422
 
 
+async def test_the_calibration_window_can_be_started_and_stopped(
+    client: AsyncClient,
+) -> None:
+    auth = await register(client, "care_settings_calibration")
+
+    started = await client.put(
+        "/api/v1/proactive-care/behavior-calibration",
+        headers=auth_headers(auth),
+        json={"days": 7},
+    )
+    assert started.status_code == 200
+    until = started.json()["behavior_calibration_until"]
+    assert until is not None
+    days_left = datetime.fromisoformat(until) - datetime.now(timezone.utc)
+    assert timedelta(days=6, hours=23) < days_left < timedelta(days=7, minutes=1)
+
+    stopped = await client.put(
+        "/api/v1/proactive-care/behavior-calibration",
+        headers=auth_headers(auth),
+        json={"days": 0},
+    )
+    assert stopped.status_code == 200
+    assert stopped.json()["behavior_calibration_until"] is None
+
+    # 校准是过渡办法，不是永久账户：最多 30 天。
+    for nonsense in (-1, 31):
+        refused = await client.put(
+            "/api/v1/proactive-care/behavior-calibration",
+            headers=auth_headers(auth),
+            json={"days": nonsense},
+        )
+        assert refused.status_code == 422
+
+
 async def test_the_patient_can_choose_which_hour_the_check_in_arrives(
     client: AsyncClient,
 ) -> None:

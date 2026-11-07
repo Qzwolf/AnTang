@@ -4,7 +4,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -82,8 +82,17 @@ from antang_api.schemas.chat import (
     MessageStartedEvent,
     TextDeltaEvent,
 )
+from antang_api.proactive_care.behavior_signals import (
+    behavior_signals,
+    render_behavior_signal_context,
+)
 from antang_api.proactive_care.service import record_user_activity
 from antang_api.psychosocial import read_latest_assessment, render_guidance
+from antang_api.psychosocial.dual_risk import (
+    recent_annotations,
+    render_dual_risk_context,
+)
+from antang_api.psychosocial.graphs import graph_snapshot, render_case_graph_context
 from antang_api.psychosocial.hypo_review import render_hypo_review_prompt
 from antang_api.behavioral import read_fear_summary, render_behavior_context
 from antang_api.settings import settings
@@ -138,15 +147,22 @@ TOOL_ACTIVITY_PHASES: dict[str, ActivityPhase] = {
     "read_wearable_data": "reading",
     "search_diabetes_knowledge": "reading",
     "read_glucose_readings": "reading",
+    "find_glucose_readings": "reading",
     "delegate_health_profile": "organizing",
     "manage_care_plan": "organizing",
     "log_fear_behavior": "organizing",
     "record_hypoglycemia_belief": "organizing",
     "record_meal": "organizing",
     "record_medication": "organizing",
+    "record_activity": "organizing",
+    "record_sleep": "organizing",
     RECORD_GLUCOSE_TOOL_NAME: "organizing",
     RECORD_GLUCOSE_REPORT_TOOL_NAME: "organizing",
     DELETE_GLUCOSE_REPORT_TOOL_NAME: "organizing",
+    "record_case_node": "organizing",
+    "connect_case_nodes": "organizing",
+    "read_case_graph": "reading",
+    "record_dual_risk": "organizing",
 }
 
 
@@ -175,6 +191,8 @@ RECORD_CLAIM_PATTERN = re.compile(
 RECORD_TOOL_NAMES = (
     RECORD_MEAL_TOOL_NAME,
     RECORD_MEDICATION_TOOL_NAME,
+    "record_activity",
+    "record_sleep",
     RECORD_GLUCOSE_TOOL_NAME,
     RECORD_GLUCOSE_REPORT_TOOL_NAME,
 )
@@ -876,6 +894,18 @@ async def stream_chat_run(
             )
             if part
         )
+        # 他自己说过的念头和情绪：最近几条跟着上下文走，省得每轮都去翻表。
+        case_graph_context = render_case_graph_context(
+            await graph_snapshot(session, user_id=user_id)
+        )
+        # 他以前把哪些时刻标成过「血糖危险但没感觉」这一类，只提他自己标过的。
+        dual_risk_context = render_dual_risk_context(
+            await recent_annotations(
+                session,
+                user_id=user_id,
+                since=datetime.now(UTC) - timedelta(days=90),
+            )
+        )
         # 复盘只问一次：读取最近 24 小时里偏低、还没问过的那一条。
         # prepare_chat_context 会 rollback，之后再碰 ORM 对象就会过期，
         # 所以这里立刻把开场白定下来，只留 reading.id。
@@ -955,6 +985,14 @@ async def stream_chat_run(
             },
             ensure_ascii=False,
         )
+        # 他最近的行为痕迹：只用来理解「为什么反复测 / 为什么不去跑步」，不主动播报。
+        behavior_signal_context = render_behavior_signal_context(
+            await behavior_signals(
+                session,
+                user_id=user_id,
+                timezone_name=care_settings.timezone,
+            )
+        )
         live_heart_rate_context = ""
         if live_heart_rate is not None:
             measured_at = live_heart_rate.measured_at
@@ -979,6 +1017,9 @@ async def stream_chat_run(
             live_heart_rate_context=live_heart_rate_context,
             psychosocial_context=psychosocial_context,
             behavior_context=behavior_context,
+            case_graph_context=case_graph_context,
+            dual_risk_context=dual_risk_context,
+            behavior_signal_context=behavior_signal_context,
             glucose_context=glucose_context,
             hypo_review_context=hypo_review_context,
             speech_cue_context=speech_cue_context,

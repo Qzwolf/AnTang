@@ -57,6 +57,12 @@ from antang_api.schemas.glucose import (
     GlucoseTargetResponse,
     GlucoseTargetUpdate,
 )
+from antang_api.schemas.activity import (
+    ActivityLogRequest,
+    ActivityLogResponse,
+    SleepLogRequest,
+    SleepLogResponse,
+)
 from antang_api.schemas.nutrition import (
     MealLogRequest,
     MealLogResponse,
@@ -88,6 +94,17 @@ from antang_api.health_profile.wearable_service import (
     read_wearable_observations,
 )
 from antang_api.proactive_care.service import record_health_import
+from antang_api.psychosocial.graphs import (
+    KIND_LABELS,
+    RELATION_LABELS,
+    graph_snapshot,
+)
+from antang_api.psychosocial.dual_risk import (
+    PATIENT_LABEL_LABELS,
+    FeltRisk,
+    PhysiologicalRisk,
+    RiskLabel,
+)
 from antang_api.psychosocial import (
     WHO5_INSTRUMENT,
     Instrument,
@@ -100,6 +117,7 @@ from antang_api.psychosocial import (
 from antang_api.psychosocial.report import patient_assessment_response
 from antang_api.models import (
     HYPOGLYCEMIA_BELIEFS,
+    ActivityLog,
     HealthProfileChange,
     MealLog,
     MedicationLog,
@@ -108,6 +126,8 @@ from antang_api.models import (
     ProfileChangeMode,
     ProfileChangeStatus,
     PsychosocialAssessment,
+    RiskAnnotation,
+    SleepLog,
     User,
     WearableRecordType,
 )
@@ -116,6 +136,11 @@ from antang_api.schemas.health_profile import (
     BehaviorLogResponse,
     BeliefEventResponse,
     BeliefNodeResponse,
+    CaseGraphEdgeResponse,
+    CaseGraphNodeResponse,
+    CaseGraphResponse,
+    DualRiskEntryResponse,
+    DualRiskListResponse,
     FearSummaryResponse,
     HealthProfileChangeRequest,
     HealthProfileChangeResponse,
@@ -1248,3 +1273,212 @@ async def export_patient_data(
             "Cache-Control": "no-store",
         },
     )
+
+
+@router.get("/case-graph", response_model=CaseGraphResponse)
+async def get_case_graph(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CaseGraphResponse:
+    """患者自己那张认知图与情绪图的只读视图。
+
+    这里只读：节点是他原话说出来的，改、删都要他再说一次，
+    所以这个接口不提供写入，界面也不给「编辑」。
+    """
+
+    snapshot = await graph_snapshot(session, user_id=user.id)
+    raw_nodes = snapshot.get("nodes")
+    raw_edges = snapshot.get("edges")
+    nodes = [
+        CaseGraphNodeResponse(
+            id=UUID(str(node["id"])),
+            layer=node["layer"],
+            kind=str(node["kind"]),
+            kind_label=KIND_LABELS.get(str(node["kind"]), str(node["kind"])),
+            text=str(node["text"]),
+            intensity=node.get("intensity"),
+        )
+        for node in (raw_nodes if isinstance(raw_nodes, list) else [])
+        if isinstance(node, dict)
+    ]
+    edges = [
+        CaseGraphEdgeResponse(
+            from_node_id=UUID(str(edge["from"])),
+            to_node_id=UUID(str(edge["to"])),
+            relation=str(edge["relation"]),
+            relation_label=RELATION_LABELS.get(
+                str(edge["relation"]), str(edge["relation"])
+            ),
+            note=edge.get("note"),
+        )
+        for edge in (raw_edges if isinstance(raw_edges, list) else [])
+        if isinstance(edge, dict)
+    ]
+    return CaseGraphResponse(nodes=nodes, edges=edges)
+
+
+# 只给最近 30 天：再往前翻，「那天到底有没有感觉」多半已经记不清，摆出来只会让人
+# 觉得被翻旧账。上限 60 条是兜底，正常一个月不会到。
+DUAL_RISK_WINDOW_DAYS = 30
+DUAL_RISK_LIMIT = 60
+
+
+@router.get("/dual-risk", response_model=DualRiskListResponse)
+async def get_dual_risk(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DualRiskListResponse:
+    """他自己说过的「当时血糖多少 × 当时有没有感觉」，逐条只读。
+
+    不做汇总：把「这个月 4 次、其中 2 次没觉得」写在上面，它就变成了要完成的
+    指标；而他要认出的是那几个具体的时刻。也不提供写入——要改就在对话里再说一次。
+    """
+
+    since = datetime.now(UTC) - timedelta(days=DUAL_RISK_WINDOW_DAYS)
+    rows = await session.scalars(
+        select(RiskAnnotation)
+        .where(
+            RiskAnnotation.user_id == user.id,
+            RiskAnnotation.measured_at >= since,
+        )
+        .order_by(RiskAnnotation.measured_at.desc(), RiskAnnotation.id.desc())
+        .limit(DUAL_RISK_LIMIT)
+    )
+    return DualRiskListResponse(
+        entries=[
+            DualRiskEntryResponse(
+                id=row.id,
+                measured_at=row.measured_at,
+                value_mg_dl=row.value_mg_dl,
+                physiological_risk=cast(PhysiologicalRisk, row.physiological_risk),
+                felt_risk=cast(FeltRisk, row.felt_risk),
+                label=cast(RiskLabel, row.label),
+                label_text=PATIENT_LABEL_LABELS.get(row.label, row.label),
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.post(
+    "/activity-logs",
+    response_model=ActivityLogResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_activity_log(
+    payload: ActivityLogRequest,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ActivityLogResponse:
+    """记一次运动。只记做了什么、多久、多累，不算消耗、不评价够不够。"""
+
+    log = ActivityLog(
+        user_id=user.id,
+        performed_at=payload.performed_at,
+        kind=payload.kind,
+        minutes=payload.minutes,
+        intensity=payload.intensity,
+        note=(payload.note or "").strip() or None,
+    )
+    session.add(log)
+    await session.commit()
+    await session.refresh(log)
+    return ActivityLogResponse.model_validate(log)
+
+
+@router.get("/activity-logs", response_model=list[ActivityLogResponse])
+async def list_activity_logs(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> list[ActivityLogResponse]:
+    """按时间倒序返回最近的补记运动，供记录页展示。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.scalars(
+            select(ActivityLog)
+            .where(
+                ActivityLog.user_id == user.id,
+                ActivityLog.performed_at >= since,
+            )
+            .order_by(ActivityLog.performed_at.desc(), ActivityLog.id.desc())
+        )
+    ).all()
+    return [ActivityLogResponse.model_validate(row) for row in rows]
+
+
+@router.delete("/activity-logs/{log_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_activity_log(
+    log_id: UUID,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """患者自己删掉一条运动记录（硬删除，无法恢复）。"""
+
+    log = await session.get(ActivityLog, log_id)
+    if log is None or log.user_id != user.id:
+        raise HTTPException(status_code=404, detail="没有这条记录")
+    await session.delete(log)
+    await session.commit()
+
+
+@router.post(
+    "/sleep-logs",
+    response_model=SleepLogResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sleep_log(
+    payload: SleepLogRequest,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> SleepLogResponse:
+    """记一段睡眠。只记几点睡、几点醒，不做睡眠分期。"""
+
+    log = SleepLog(
+        user_id=user.id,
+        fell_asleep_at=payload.fell_asleep_at,
+        woke_at=payload.woke_at,
+        note=(payload.note or "").strip() or None,
+    )
+    session.add(log)
+    await session.commit()
+    await session.refresh(log)
+    return SleepLogResponse.model_validate(log)
+
+
+@router.get("/sleep-logs", response_model=list[SleepLogResponse])
+async def list_sleep_logs(
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> list[SleepLogResponse]:
+    """按入睡时间倒序返回最近的补记睡眠。"""
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.scalars(
+            select(SleepLog)
+            .where(
+                SleepLog.user_id == user.id,
+                SleepLog.fell_asleep_at >= since,
+            )
+            .order_by(SleepLog.fell_asleep_at.desc(), SleepLog.id.desc())
+        )
+    ).all()
+    return [SleepLogResponse.model_validate(row) for row in rows]
+
+
+@router.delete("/sleep-logs/{log_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sleep_log(
+    log_id: UUID,
+    user: Annotated[User, Depends(get_patient_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """患者自己删掉一条睡眠记录（硬删除，无法恢复）。"""
+
+    log = await session.get(SleepLog, log_id)
+    if log is None or log.user_id != user.id:
+        raise HTTPException(status_code=404, detail="没有这条记录")
+    await session.delete(log)
+    await session.commit()

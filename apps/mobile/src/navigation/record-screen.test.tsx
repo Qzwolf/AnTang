@@ -2,7 +2,14 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { Alert } from "react-native";
 
 import type { GlucoseReading, GlucoseSummary, MealLog, MedicationLog } from "../api/types";
-import { RecordScreen, formatGlucose, formatMeasuredAt, trendSeries } from "./record-screen";
+import type { ActivityLogEntry, SleepLogEntry } from "../api/logs";
+import {
+  RecordScreen,
+  formatGlucose,
+  formatMeasuredAt,
+  formatSleepLength,
+  trendSeries,
+} from "./record-screen";
 import { fakeGadgetbridge, fakeHealthConnect } from "./device-controllers.fake";
 
 /**
@@ -58,6 +65,23 @@ const MEDICATION: MedicationLog = {
   createdAt: atLocal(10, 24, 7, 51),
 };
 
+const ACTIVITY: ActivityLogEntry = {
+  id: "00000000-0000-0000-0000-000000000004",
+  performedAt: atLocal(10, 24, 18, 10),
+  kind: "walk",
+  minutes: 30,
+  intensity: "moderate",
+  note: null,
+};
+
+const SLEEP: SleepLogEntry = {
+  id: "00000000-0000-0000-0000-000000000005",
+  fellAsleepAt: atLocal(10, 24, 0, 20),
+  wokeAt: atLocal(10, 24, 7, 40),
+  minutes: 440,
+  note: null,
+};
+
 const DASHBOARD = {
   periodStart: "2026-10-17T00:00:00+08:00",
   periodEnd: "2026-10-24T00:00:00+08:00",
@@ -109,6 +133,12 @@ function fakeApi(overrides: Record<string, unknown> = {}) {
     getCgmSamples: jest.fn(async () => ({ days: 7, count: 0, samples: [] })),
     getGlucoseReports: jest.fn(async () => []),
     deleteGlucoseReport: jest.fn(async () => undefined),
+    getActivityLogs: jest.fn(async () => [] as ActivityLogEntry[]),
+    recordActivityLog: jest.fn(async () => ACTIVITY),
+    deleteActivityLog: jest.fn(async () => undefined),
+    getSleepLogs: jest.fn(async () => [] as SleepLogEntry[]),
+    recordSleepLog: jest.fn(async () => SLEEP),
+    deleteSleepLog: jest.fn(async () => undefined),
     saveChatAttachment: jest.fn(async () => ({
       uri: "file:///cache/chat-attachment-attachment-2.pdf",
       mimeType: "application/pdf",
@@ -120,12 +150,14 @@ function fakeApi(overrides: Record<string, unknown> = {}) {
 async function mount(
   api = fakeApi(),
   handlers: { onImport?: () => void; onRecordGlucose?: () => void } = {},
+  focus: { at: string; id: number } | null = null,
 ): Promise<ReactTestRenderer> {
   let renderer: ReactTestRenderer | null = null;
   await act(async () => {
     renderer = create(
       <RecordScreen
         api={api as never}
+        focus={focus}
         gadgetbridge={fakeGadgetbridge()}
         healthConnect={fakeHealthConnect()}
         onImport={handlers.onImport ?? (() => undefined)}
@@ -309,7 +341,8 @@ describe("RecordScreen", () => {
     alert.mockRestore();
   });
 
-  it("lists meals and saves a new one without leaving the tab", async () => {    const api = fakeApi();
+  it("lists meals and saves a new one without leaving the tab", async () => {
+    const api = fakeApi();
     const tree = await mount(api);
 
     await act(async () => {
@@ -519,6 +552,46 @@ describe("glucose trend series", () => {
   });
 });
 
+describe("record focus", () => {
+  it("lands on the moment he tapped and says which one it is", async () => {
+    // 20 天前点的：默认 14 天窗口不含它，必须把窗口放宽到包住那一天。
+    const focusAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000 - 3600 * 1000).toISOString();
+    const api = fakeApi({
+      getGlucoseReadings: jest.fn(async () => [
+        { ...READING, measuredAt: focusAt, createdAt: focusAt },
+      ]),
+    });
+    const tree = await mount(api, {}, { at: focusAt, id: 1 });
+
+    expect(api.getGlucoseReadings).toHaveBeenCalledWith(22);
+    const text = JSON.stringify(tree.toJSON());
+    expect(text).toContain("那次的记录");
+    expect(text).toContain("取消定位");
+  });
+
+  it("does not pretend to find a reading that is gone", async () => {
+    const focusAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const tree = await mount(fakeApi({ getGlucoseReadings: jest.fn(async () => []) }), {}, {
+      at: focusAt,
+      id: 1,
+    });
+
+    const text = JSON.stringify(tree.toJSON());
+    expect(text).toContain("那次没找到读数，可能已经删掉了");
+  });
+
+  it("lets him put the highlight away", async () => {
+    const focusAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const tree = await mount(fakeApi(), {}, { at: focusAt, id: 1 });
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "取消定位" }).props.onPress();
+    });
+
+    expect(JSON.stringify(tree.toJSON())).not.toContain("那次的记录");
+  });
+});
+
 describe("record formatting", () => {
   it("shows every reading in mmol/L, the unit patients here actually use", () => {
     expect(formatGlucose(READING)).toBe("5.5 mmol/L");
@@ -528,5 +601,104 @@ describe("record formatting", () => {
   it("formats the measurement time as month-day hour:minute", () => {
     const text = formatMeasuredAt(atLocal(10, 24, 12, 35));
     expect(text).toBe("10-24 12:35");
+  });
+
+  it("says a night's length in hours and minutes", () => {
+    expect(formatSleepLength(440)).toBe("约 7 小时 20 分钟");
+    expect(formatSleepLength(480)).toBe("约 8 小时");
+    expect(formatSleepLength(40)).toBe("约 40 分钟");
+    expect(formatSleepLength(0)).toBe("还不满一分钟");
+  });
+});
+
+describe("manual activity and sleep", () => {
+  it("lets him add a walk by hand when the band was flat", async () => {
+    const api = fakeApi();
+    const tree = await mount(api);
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "运动分类" }).props.onPress();
+    });
+    expect(JSON.stringify(tree.toJSON())).toContain("还没有自己补记的运动");
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "运动类型跑步" }).props.onPress();
+    });
+    await act(async () => {
+      tree.root
+        .findByProps({ accessibilityLabel: "运动时长（分钟）" })
+        .props.onChangeText("45");
+    });
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "运动强度较强" }).props.onPress();
+    });
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "保存这次运动" }).props.onPress();
+    });
+
+    expect(api.recordActivityLog).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "run", minutes: 45, intensity: "vigorous" }),
+    );
+    // 手环那半边还在：手填不覆盖导入的数据。
+    expect(JSON.stringify(tree.toJSON())).toContain("近 7 天步数");
+  });
+
+  it("shows a hand-written entry and lets him delete it", async () => {
+    const api = fakeApi({ getActivityLogs: jest.fn(async () => [ACTIVITY]) });
+    const tree = await mount(api);
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "运动分类" }).props.onPress();
+    });
+    const text = JSON.stringify(tree.toJSON());
+    expect(text).toContain("走路 · 30 分钟");
+    expect(text).toContain("强度中等");
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "删除这条运动记录" }).props.onPress();
+    });
+    expect(api.deleteActivityLog).toHaveBeenCalledWith(ACTIVITY.id);
+  });
+
+  it("records a night from two times instead of asking for a duration", async () => {
+    const api = fakeApi();
+    const tree = await mount(api);
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "睡眠分类" }).props.onPress();
+    });
+    expect(JSON.stringify(tree.toJSON())).toContain("还没有自己补记的睡眠");
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "保存这段睡眠" }).props.onPress();
+    });
+
+    expect(api.recordSleepLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fellAsleepAt: expect.any(String),
+        wokeAt: expect.any(String),
+      }),
+    );
+  });
+
+  it("refuses a night that ends before it starts", async () => {
+    const api = fakeApi();
+    const tree = await mount(api);
+
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "睡眠分类" }).props.onPress();
+    });
+    // 醒来时间设成比入睡时间还早：先给一句人话，不把 422 原样甩给他。
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "几点睡的" }).props.onChange(
+        new Date(Date.now() + 60 * 60 * 1000),
+      );
+    });
+    await act(async () => {
+      tree.root.findByProps({ accessibilityLabel: "保存这段睡眠" }).props.onPress();
+    });
+
+    expect(api.recordSleepLog).not.toHaveBeenCalled();
+    expect(JSON.stringify(tree.toJSON())).toContain("醒来时间要晚于入睡时间");
   });
 });

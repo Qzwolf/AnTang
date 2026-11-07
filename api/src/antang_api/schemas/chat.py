@@ -175,6 +175,7 @@ class ChatMessageResponse(BaseModel):
     role: MessageRole
     status: MessageStatus
     content: str
+    proactive_reason: str | None = None
     sources: list[ChatSource]
     attachments: list[ChatAttachmentResponse] = Field(default_factory=list)
     created_at: datetime

@@ -451,6 +451,34 @@ describe('proactive care notification data', () => {
       }),
     ).toThrow('notification.kind 无效');
   });
+
+  test('accepts a behaviour-signal notification, which is a new care kind', () => {
+    expect(
+      parseProactiveCareNotificationData({
+        kind: 'behavior_signal',
+        message_id: '019b5555-5555-7555-8555-555555555555',
+        delivery_id: '019b6666-6666-7666-8666-666666666666',
+      }).kind,
+    ).toBe('behavior_signal');
+  });
+});
+
+describe('why the assistant spoke first', () => {
+  test('reads the reason a proactive message carries', () => {
+    const history = historyWith([]);
+    const message = history.messages[0] as Record<string, unknown>;
+    message.proactive_reason = '到了我们平时说说话的时间';
+
+    expect(parseMessageHistory(history).messages[0].proactiveReason).toBe(
+      '到了我们平时说说话的时间',
+    );
+  });
+
+  test('treats a missing reason as null so old servers still parse', () => {
+    expect(parseMessageHistory(historyWith([])).messages[0].proactiveReason).toBe(
+      null,
+    );
+  });
 });
 
 describe('proactive care settings', () => {

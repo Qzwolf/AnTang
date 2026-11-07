@@ -30,7 +30,19 @@ from antang_api.health_profile.glucose import (
     summarize_glucose,
     to_mmol,
 )
-from antang_api.models import AgentRun, GlucoseReport, Message, MessageAttachment, MessageRole
+from antang_api.health_profile.query_parse import (
+    DEFAULT_TIMEZONE,
+    parse_glucose_phrase,
+)
+from antang_api.models import (
+    AgentRun,
+    GlucoseReading,
+    GlucoseReport,
+    Message,
+    MessageAttachment,
+    MessageRole,
+    ProactiveCareSettings,
+)
 from antang_api.health_profile.report_parse import (
     ParsedReport,
     UnreadableReport,
@@ -49,6 +61,7 @@ logger = logging.getLogger(__name__)
 Recheck = Callable[[MessageAttachment], Awaitable[dict[str, object]]]
 
 READ_GLUCOSE_TOOL_NAME = "read_glucose_readings"
+FIND_GLUCOSE_TOOL_NAME = "find_glucose_readings"
 RECORD_GLUCOSE_TOOL_NAME = "record_glucose_readings"
 RECORD_GLUCOSE_REPORT_TOOL_NAME = "record_glucose_report"
 DELETE_GLUCOSE_REPORT_TOOL_NAME = "delete_glucose_report"
@@ -161,6 +174,114 @@ def build_glucose_read_tool(
         }
 
     return read_glucose_readings
+
+
+class GlucosePhraseRequest(BaseModel):
+    """患者原话 + 最多要几条。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    when: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=80,
+            description=(
+                "患者说的时间，原样抄进来，例如「上周三晚饭前」「最近三天夜里」"
+                "「昨天下午」。不要自己改成「最近七天」。"
+            ),
+        ),
+    ]
+    limit: Annotated[
+        int,
+        Field(ge=1, le=50, description="最多返回多少条，默认 5 条。"),
+    ] = 5
+
+
+def build_find_glucose_tool(
+    sessions: async_sessionmaker[AsyncSession] = default_session_factory,
+) -> BaseTool:
+    """创建「按患者的说法找那次读数」的工具。"""
+
+    @tool(FIND_GLUCOSE_TOOL_NAME)
+    async def find_glucose_readings(
+        request: GlucosePhraseRequest,
+        runtime: ToolRuntime[AgentContext],
+    ) -> dict[str, object]:
+        """按患者自己的说法找某一次或某一时段的血糖读数。
+
+        患者说「上周三晚饭前那次多少」「这两天的夜里是不是偏低」时用它，`when`
+        原样抄他的说法。认不出是哪一天时返回 `understood=false`，这时问他一句，
+        不要换成「最近七天」再答。数值单位 mmol/L，患者自己记的可能漏记。
+        """
+
+        async with sessions() as session:
+            care_settings = await session.get(
+                ProactiveCareSettings, runtime.context.user_id
+            )
+            timezone_name = (
+                care_settings.timezone
+                if care_settings is not None
+                else DEFAULT_TIMEZONE
+            )
+            query = parse_glucose_phrase(
+                request.when, timezone_name=timezone_name
+            )
+            if query is None:
+                return {
+                    "understood": False,
+                    "phrase": request.when,
+                    "note": "这句里没认出是哪一天，问一句「你说的是哪天」，不要换成最近七天。",
+                }
+            conditions = [
+                GlucoseReading.user_id == runtime.context.user_id,
+                GlucoseReading.revoked_at.is_(None),
+                GlucoseReading.measured_at >= query.start,
+                GlucoseReading.measured_at <= query.end,
+            ]
+            if query.contexts:
+                conditions.append(GlucoseReading.context.in_(query.contexts))
+            rows = (
+                await session.scalars(
+                    select(GlucoseReading)
+                    .where(*conditions)
+                    .order_by(
+                        GlucoseReading.measured_at.desc(), GlucoseReading.id.desc()
+                    )
+                    .limit(request.limit)
+                )
+            ).all()
+
+        if not rows:
+            return {
+                "understood": True,
+                "span": query.describe(),
+                "count": 0,
+                "note": "这段时间里没有符合的记录，不要说成「都正常」。",
+                "notes": list(query.notes),
+            }
+        return {
+            "understood": True,
+            "span": query.describe(),
+            "count": len(rows),
+            "readings": [
+                {
+                    "measured_at": measured_time_label(
+                        row.measured_at, row.measured_precision
+                    ),
+                    "approximate": row.measured_precision == "daypart",
+                    "value_mmol": to_mmol(row.value_mg_dl),
+                    "context": GLUCOSE_CONTEXT_LABELS.get(row.context, row.context),
+                    "source": row.source,
+                    "note": row.note,
+                }
+                for row in rows
+            ],
+            "notes": list(query.notes),
+            "note": "患者自己记的，可能漏记；引他的原话说明是哪一次。",
+        }
+
+    return find_glucose_readings
 
 
 class GlucosePoint(BaseModel):

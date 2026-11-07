@@ -119,6 +119,7 @@ describe('ChatScreen', () => {
             role: 'user',
             status: 'completed',
             content: '请帮我看看这张照片。',
+            proactiveReason: null,
             sources: [],
             attachments: [
               {
@@ -163,6 +164,70 @@ describe('ChatScreen', () => {
         .source,
     ).toEqual(imageSource);
     expect(tree!.root.findAllByProps({ children: 'report.jpg' })).toHaveLength(0);
+    act(() => tree!.unmount());
+  });
+
+  test('says why a proactive message spoke first', async () => {
+    const api = {
+      getConversations: jest.fn().mockResolvedValue([
+        {
+          id: '019b3333-3333-7333-8333-333333333333',
+          title: '关怀消息',
+          createdAt: '2026-11-02T04:00:00.000Z',
+          lastMessageAt: new Date().toISOString(),
+          messageCount: 1,
+        },
+      ]),
+      startConversation: jest.fn().mockResolvedValue({
+        id: '019b4444-4444-7444-8444-444444444444',
+        title: '新对话',
+        createdAt: '2026-11-02T05:00:00.000Z',
+        lastMessageAt: null,
+        messageCount: 0,
+      }),
+      getMessages: jest.fn().mockResolvedValue({
+        messages: [
+          {
+            id: '019b1111-1111-7111-8111-111111111111',
+            clientMessageId: null,
+            role: 'assistant',
+            status: 'completed',
+            content: '这两天过得怎么样？',
+            proactiveReason: '到了我们平时说说话的时间',
+            sources: [],
+            attachments: [],
+            createdAt: '2026-11-02T05:00:00.000Z',
+            completedAt: '2026-11-02T05:00:01.000Z',
+          },
+        ],
+        nextBefore: null,
+      }),
+    } as unknown as ApiClient;
+
+    let tree: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(
+        <ChatScreen
+          gadgetbridge={fakeGadgetbridge()}
+          healthConnect={fakeHealthConnect()}
+          api={api}
+          user={{ id: 'user-1', username: 'demo', role: 'patient' }}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const lines = tree!.root.findAllByProps({
+      accessibilityLabel: '这次是我先开口：到了我们平时说说话的时间',
+    });
+    // 复合组件和它渲染出的宿主节点会共享同一份 props，去重后应当只有一句。
+    const rendered = new Set(
+      lines
+        .map((node) => JSON.stringify(node.props.children ?? ''))
+        .filter((value) => value.includes('到了我们平时说说话的时间')),
+    );
+    expect(rendered.size).toBe(1);
     act(() => tree!.unmount());
   });
 

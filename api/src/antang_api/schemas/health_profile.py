@@ -730,3 +730,49 @@ class FearSummaryResponse(BaseModel):
         "unknown",
     ]
     discrepancy_note: str
+
+
+class CaseGraphNodeResponse(BaseModel):
+    """一个念头或一段情绪。患者在自己的心理页里能看，改了要他自己说。"""
+
+    id: UUID
+    layer: Literal["cognitive", "affective"]
+    kind: str
+    kind_label: str
+    text: str
+    intensity: int | None
+
+
+class CaseGraphEdgeResponse(BaseModel):
+    """两条节点之间他亲口说过的因果。"""
+
+    from_node_id: UUID
+    to_node_id: UUID
+    relation: str
+    relation_label: str
+    note: str | None
+
+
+class CaseGraphResponse(BaseModel):
+    nodes: list[CaseGraphNodeResponse]
+    edges: list[CaseGraphEdgeResponse]
+
+
+class DualRiskEntryResponse(BaseModel):
+    """一次「当时血糖多少」与「当时他说有没有感觉」的对照。
+
+    只读。标签由服务端算好（`label`），句子也给一份（`label_text`），手机上不需要
+    再拼中文，免得两个端各说一套。
+    """
+
+    id: UUID
+    measured_at: datetime
+    value_mg_dl: int | None
+    physiological_risk: Literal["none", "moderate", "high"]
+    felt_risk: Literal["none", "some", "strong"]
+    label: Literal["both", "silent", "felt_only", "neither"]
+    label_text: str
+
+
+class DualRiskListResponse(BaseModel):
+    entries: list[DualRiskEntryResponse]

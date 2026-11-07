@@ -5,8 +5,9 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from antang_api.agents.proactive_care import (
     PROACTIVE_CARE_AGENT_NAME,
@@ -37,15 +38,25 @@ from antang_api.models import (
     PushInstallation,
     PushPermissionState,
     PushPlatform,
+    RiskAnnotation,
     RoutineCareCadence,
     WearableImport,
     WearableObservation,
     WearableRecordType,
 )
+from antang_api.proactive_care.actions import ACTIONS
+from antang_api.proactive_care.behavior_dispatch import (
+    BEHAVIOR_SIGNAL_RULE_ID,
+    BEHAVIOR_SIGNAL_RULE_VERSION,
+    behavior_event_key,
+)
+from antang_api.proactive_care.behavior_signals import BehaviorSignal
 from antang_api.proactive_care.processor import (
     HEART_RATE_SAFETY_TEXT,
     ProactiveCareProcessor,
 )
+from antang_api.proactive_care import processor as processor_module
+from antang_api.proactive_care.reasons import ROUTINE_REASON
 from antang_api.proactive_care.worker import ProactiveCareWorker
 from antang_api.settings import settings as app_settings
 
@@ -603,6 +614,19 @@ async def test_worker_generates_audits_and_commits_one_message(
                 "这两天过得怎么样？有空跟我说一句就好。",
             ),
         ]
+        # 患者自己的消息不带原因；主动关怀那条带着「为什么是我先开口」。
+        assert messages[0].proactive_reason is None
+        assert messages[1].proactive_reason is not None
+        # 原因句会随「这会儿是早上还是深夜」在两种说法之间切换，但都得说清是平时的例行问候。
+        assert messages[1].proactive_reason in {
+            ROUTINE_REASON,
+            "早上这会儿，我们平时会聊几句",
+            "上午这会儿，我们平时会聊几句",
+            "中午这会儿，我们平时会聊几句",
+            "下午这会儿，我们平时会聊几句",
+            "傍晚这会儿，我们平时会聊几句",
+            "晚上这会儿，我们平时会聊几句",
+        }
 
         runs = list(
             await session.scalars(
@@ -1772,6 +1796,81 @@ async def test_proactive_context_carries_recent_behaviors_and_beliefs(
     assert "不要在回复里报这些次数" in behavior_context
 
 
+async def test_proactive_context_knows_when_he_could_not_feel_a_low(
+    committed_user_id: UUID,
+) -> None:
+    """他有过「低下去却没感觉」的时刻时，主动消息要先问身体，而不是数字。"""
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        # 别的用例可能留下排着队的任务；Worker 一次只领一条，先清掉，免得抢走。
+        await session.execute(
+            update(ProactiveCareTask)
+            .where(
+                ProactiveCareTask.status == ProactiveCareTaskStatus.SCHEDULED,
+                ProactiveCareTask.user_id != committed_user_id,
+            )
+            .values(
+                status=ProactiveCareTaskStatus.CANCELLED,
+                outcome_reason="test_cleanup",
+            )
+        )
+        session.add_all(
+            [
+                RiskAnnotation(
+                    user_id=committed_user_id,
+                    measured_at=now - timedelta(days=2, hours=3),
+                    value_mg_dl=58,
+                    physiological_risk="high",
+                    felt_risk="none",
+                    label="silent",
+                ),
+                ProactiveCareTask(
+                    user_id=committed_user_id,
+                    kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+                    status=ProactiveCareTaskStatus.SCHEDULED,
+                    due_at=now - timedelta(minutes=1),
+                    expires_at=now + timedelta(hours=12),
+                ),
+            ]
+        )
+        await session.commit()
+
+    draft_graph = FakeGraph(
+        ProactiveCareDecision(
+            action="send",
+            message="这两天有没有过心里发虚、手心冒汗的时候？",
+            reason="他有没察觉到低血糖的时刻",
+        )
+    )
+    processor = ProactiveCareProcessor(
+        agent=cast(Any, draft_graph),
+        auditor=cast(
+            Any,
+            FakeGraph(ProactiveCareAudit(decision="approve", reason="内容克制")),
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+    )
+
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+
+    payload = json.loads(draft_graph.calls[0][0]["messages"][0].content)
+    sensation_context = payload["sensation_context"]
+    assert "[他有过血糖已经偏低、身上却没报警的时刻]" in sensation_context
+    assert "3.2 mmol/L，当时他没觉得" in sensation_context
+    assert "出汗、心慌、发虚" in sensation_context
+
+
 async def _seed_sent_routine_contacts(
     user_id: UUID,
     *,
@@ -2036,3 +2135,192 @@ async def test_a_full_week_that_outlives_the_task_schedules_a_new_one(
         assert next_task.id != task_id
         # 按用户自己的日常节奏（每 3 天）重排，到那天额度早就腾出来了。
         assert abs((next_task.due_at - now) - timedelta(days=3)) < timedelta(seconds=5)
+
+
+async def _run_routine_with_refiner(
+    committed_user_id: UUID,
+    *,
+    draft: str,
+    rewrite: Callable[[str], Awaitable[str]],
+) -> str:
+    """跑一条日常问候，返回真正发出去的那句话。"""
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        session.add(
+            ProactiveCareTask(
+                user_id=committed_user_id,
+                kind=ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+                status=ProactiveCareTaskStatus.SCHEDULED,
+                due_at=now - timedelta(minutes=1),
+                expires_at=now + timedelta(hours=12),
+            )
+        )
+        await session.commit()
+
+    processor = ProactiveCareProcessor(
+        agent=cast(
+            Any,
+            FakeGraph(
+                ProactiveCareDecision(action="send", message=draft, reason="日常问候到期")
+            ),
+        ),
+        auditor=cast(
+            Any,
+            FakeGraph(ProactiveCareAudit(decision="approve", reason="内容安全")),
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+        refiner=rewrite,
+    )
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+
+    async with session_factory() as session:
+        message = await session.scalar(
+            select(Message)
+            .where(
+                Message.user_id == committed_user_id,
+                Message.role == MessageRole.ASSISTANT,
+            )
+            .order_by(Message.id.desc())
+            .limit(1)
+        )
+    assert message is not None
+    return message.content
+
+
+async def test_a_polished_second_draft_is_what_he_gets(
+    committed_user_id: UUID,
+) -> None:
+    """带数字的稿子会过第二稿：只换说法，数字一个不动。"""
+
+    async def rewrite(draft: str) -> str:
+        return "昨晚那次 7.2 偏高些，这会儿感觉怎么样？"
+
+    sent = await _run_routine_with_refiner(
+        committed_user_id,
+        draft="昨晚 7.2，有点偏高，你现在感觉怎么样？",
+        rewrite=rewrite,
+    )
+
+    assert sent == "昨晚那次 7.2 偏高些，这会儿感觉怎么样？"
+
+
+async def test_a_second_draft_that_moves_a_number_never_reaches_him(
+    committed_user_id: UUID,
+) -> None:
+    """第二稿把 7.2 改成 8.2，就退回第一稿——改过的数字比不够顺的话更危险。"""
+
+    seen: list[str] = []
+
+    async def rewrite(draft: str) -> str:
+        seen.append(draft)
+        return "昨晚那次 8.2 偏高些，这会儿感觉怎么样？"
+
+    sent = await _run_routine_with_refiner(
+        committed_user_id,
+        draft="昨晚 7.2，有点偏高，你现在感觉怎么样？",
+        rewrite=rewrite,
+    )
+
+    assert sent == "昨晚 7.2，有点偏高，你现在感觉怎么样？"
+    assert "8.2" not in sent
+    # 两次都试过，两次都打回。
+    assert len(seen) == 2
+
+
+async def test_a_draft_without_numbers_skips_the_second_pass(
+    committed_user_id: UUID,
+) -> None:
+    """没有数字就没有可改坏的事实，这一趟不值得多调一次模型。"""
+
+    calls: list[str] = []
+
+    async def rewrite(draft: str) -> str:
+        calls.append(draft)
+        return draft
+
+    sent = await _run_routine_with_refiner(
+        committed_user_id,
+        draft="这几天过得怎么样？有空跟我说一句就好。",
+        rewrite=rewrite,
+    )
+
+    assert sent == "这几天过得怎么样？有空跟我说一句就好。"
+    assert calls == []
+
+
+async def test_a_signal_comes_with_one_small_thing_to_do(
+    committed_user_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注意到「测得比平时密」之后，除了问一句，还给一件今天就能做的事。"""
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        care_settings = await session.get(ProactiveCareSettings, committed_user_id)
+        assert care_settings is not None
+        care_settings.routine_cadence = RoutineCareCadence.EVERY_3_DAYS
+        care_settings.quiet_hours_start = datetime.min.time()
+        care_settings.quiet_hours_end = datetime.min.time()
+        care_settings.health_events_enabled = True
+        session.add(
+            ProactiveCareTask(
+                user_id=committed_user_id,
+                kind=ProactiveCareTaskKind.BEHAVIOR_SIGNAL,
+                status=ProactiveCareTaskStatus.SCHEDULED,
+                due_at=now - timedelta(minutes=1),
+                expires_at=now + timedelta(hours=12),
+                rule_id=BEHAVIOR_SIGNAL_RULE_ID,
+                rule_version=BEHAVIOR_SIGNAL_RULE_VERSION,
+                health_event_key=behavior_event_key("repeated_check"),
+                health_evidence={"kind": "repeated_check", "occurred": 6},
+            )
+        )
+        await session.commit()
+
+    async def fake_signals(*_args: object, **_kwargs: object) -> list[BehaviorSignal]:
+        return [
+            BehaviorSignal(
+                kind="repeated_check",
+                label="同一段三小时里测得比平时密",
+                occurred=6,
+                window_days=1,
+                evidence=(now - timedelta(hours=2),),
+            )
+        ]
+
+    monkeypatch.setattr(processor_module, "behavior_signals", fake_signals)
+
+    draft_graph = FakeGraph(
+        ProactiveCareDecision(
+            action="send",
+            message="最近测得挺密的，是在担心什么吗？",
+            reason="行为痕迹候选",
+        )
+    )
+    processor = ProactiveCareProcessor(
+        agent=cast(Any, draft_graph),
+        auditor=cast(
+            Any, FakeGraph(ProactiveCareAudit(decision="approve", reason="内容安全"))
+        ),
+        companion_memory=cast(Any, FakeMemory()),
+        token_model=cast(Any, FakeTokenModel()),
+        model_name="test-model",
+    )
+    assert (
+        await ProactiveCareWorker(process_task=processor.process).run_once(now=now)
+        is True
+    )
+
+    payload = json.loads(draft_graph.calls[0][0]["messages"][0].content)
+    assert payload["suggested_action"]["text"] == ACTIONS["wait_ten_minutes"].text

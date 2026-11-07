@@ -13,6 +13,7 @@ from antang_api.database import engine
 from antang_api.llm import build_proactive_care_model
 from antang_api.log_config import configure_logging
 from antang_api.proactive_care.processor import ProactiveCareProcessor
+from antang_api.proactive_care.refine import build_wording_refiner
 from antang_api.proactive_care.push import ExpoPushClient, PushDeliveryWorker
 from antang_api.proactive_care.worker import ProactiveCareWorker
 from antang_api.settings import settings
@@ -63,6 +64,7 @@ async def run_worker() -> None:
                     ),
                     token_model=model,
                     model_name=settings.resolved_proactive_model_name,
+                    refiner=build_wording_refiner(model),
                 )
                 access_token = (
                     settings.expo_push_access_token.get_secret_value()

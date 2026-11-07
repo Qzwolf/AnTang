@@ -43,6 +43,7 @@ export type PsychosocialSectionProps = {
     ApiClient,
     | 'getPsychosocialAssessment'
     | 'getPsychosocialInstrument'
+    | 'getWho5Instrument'
     | 'recordPsychosocialAssessment'
   >;
 };
@@ -52,12 +53,15 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
   const [instrument, setInstrument] = useState<PsychosocialInstrument | null>(
     null,
   );
+  // 世界卫生组织那五道是选填的附加块；老后端没有这条路由，取不到就整块不显示。
+  const [who5, setWho5] = useState<PsychosocialInstrument | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   // 默认收起：7 道题直接摊开会把「我的」页拉得很长，先给一句摘要和「开始填写」。
   const [open, setOpen] = useState(false);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [goldScore, setGoldScore] = useState<number | null>(null);
+  const [who5Answers, setWho5Answers] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -68,11 +72,14 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
     void Promise.all([
       api.getPsychosocialInstrument(),
       api.getPsychosocialAssessment(),
+      // 选填块：取不到就当没有，不能拖垮整页。
+      api.getWho5Instrument().catch(() => null),
     ]).then(
-      ([nextInstrument, nextProfile]) => {
+      ([nextInstrument, nextProfile, nextWho5]) => {
         if (!active) return;
         setInstrument(nextInstrument);
         setProfile(nextProfile);
+        setWho5(nextWho5);
         setLoadError(null);
         setLoading(false);
       },
@@ -96,21 +103,35 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
     (question) => answers[question.id] !== undefined,
   ).length;
   const complete = questions.length > 0 && answeredCount === questions.length && goldScore !== null;
+  const who5Questions = who5?.questions ?? [];
+  const who5Answered = who5Questions.filter(
+    (question) => who5Answers[question.id] !== undefined,
+  ).length;
+  // 选了但没选全就先拦住：服务端要么不收、要么整块拒掉，不如在这里说清楚。
+  const who5Partial = who5Answered > 0 && who5Answered < who5Questions.length;
+  const who5Ready =
+    who5Questions.length > 0 && who5Answered === who5Questions.length;
 
   const selectAnswer = useCallback((questionId: string, value: number) => {
     setAnswers((current) => ({ ...current, [questionId]: value }));
     setSaveError(null);
   }, []);
 
+  const selectWho5Answer = useCallback((questionId: string, value: number) => {
+    setWho5Answers((current) => ({ ...current, [questionId]: value }));
+    setSaveError(null);
+  }, []);
+
   function startOver() {
     setAnswers({});
     setGoldScore(null);
+    setWho5Answers({});
     setSaveError(null);
     setOpen(true);
   }
 
   async function submit() {
-    if (!complete || saving || instrument === null) return;
+    if (!complete || who5Partial || saving || instrument === null) return;
     const behavior = questions
       .filter((question) => question.kind === 'behavior')
       .map((question) => answers[question.id]);
@@ -131,12 +152,20 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
           id: question.id,
           value: answers[question.id],
         })),
+        // 五句全答了才带上；一道没答就当没填过。
+        who5Answers: who5Ready
+          ? who5Questions.map((question) => ({
+              id: question.id,
+              value: who5Answers[question.id],
+            }))
+          : undefined,
       });
       if (!mountedRef.current) return;
       setProfile(saved);
       setOpen(false);
       setAnswers({});
       setGoldScore(null);
+      setWho5Answers({});
     } catch (reason) {
       if (mountedRef.current) setSaveError(errorMessage(reason));
     } finally {
@@ -229,22 +258,74 @@ export function PsychosocialSection({ api }: PsychosocialSectionProps) {
             </View>
           </View>
 
+          {who5 === null ? null : (
+            <View style={styles.who5Block}>
+              <Text style={styles.who5Title}>{who5.title}</Text>
+              <Text style={styles.description}>{who5.instructions}</Text>
+              {who5Questions.map((question, index) => (
+                <View key={`who5-${question.id}`} style={styles.who5Question}>
+                  <Text style={styles.questionText}>
+                    {index + 1}. {question.text}
+                  </Text>
+                  <View style={styles.optionRow}>
+                    {who5.options.map((option) => {
+                      const selected = who5Answers[question.id] === option.value;
+                      return (
+                        <Pressable
+                          accessibilityLabel={`${question.text} ${option.label}`}
+                          accessibilityRole="radio"
+                          accessibilityState={{ selected, checked: selected }}
+                          key={`who5-${question.id}-${option.value}`}
+                          onPress={() =>
+                            selectWho5Answer(question.id, option.value)
+                          }
+                          style={[styles.option, selected && styles.optionSelected]}
+                        >
+                          <Text
+                            style={[
+                              styles.optionText,
+                              selected && styles.optionTextSelected,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              ))}
+              <Text style={styles.progressText}>
+                {who5Answered === 0
+                  ? '这五句是选填的，跳过也行。'
+                  : who5Ready
+                    ? '这五句也答完了。'
+                    : `还有 ${who5Questions.length - who5Answered} 句没选。`}
+              </Text>
+            </View>
+          )}
+
           {saveError !== null ? (
             <Text style={styles.errorText}>{saveError}</Text>
           ) : null}
 
           <Text style={styles.progressText}>
-            {complete
-              ? '已经填完了，可以保存。'
-              : `还差 ${questions.length - answeredCount + (goldScore === null ? 1 : 0)} 题。`}
+            {who5Partial
+              ? '上面那五句要么全答、要么全空着。'
+              : complete
+                ? '已经填完了，可以保存。'
+                : `还差 ${questions.length - answeredCount + (goldScore === null ? 1 : 0)} 题。`}
           </Text>
 
           <Pressable
             accessibilityRole="button"
-            accessibilityState={{ disabled: !complete || saving }}
-            disabled={!complete || saving}
+            accessibilityState={{ disabled: !complete || who5Partial || saving }}
+            disabled={!complete || who5Partial || saving}
             onPress={() => void submit()}
-            style={[styles.primaryButton, (!complete || saving) && styles.buttonDisabled]}
+            style={[
+              styles.primaryButton,
+              (!complete || who5Partial || saving) && styles.buttonDisabled,
+            ]}
           >
             {saving ? (
               <ActivityIndicator color={colors.white} size="small" />
@@ -454,5 +535,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     marginTop: spacing.sm,
+  },
+  who5Block: {
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+    marginTop: spacing.xs,
+    paddingTop: spacing.sm,
+  },
+  who5Title: {
+    color: colors.ink,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 15,
+    marginBottom: spacing.xxs,
+  },
+  who5Question: {
+    marginBottom: spacing.sm,
   },
 });

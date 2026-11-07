@@ -21,6 +21,14 @@ import type {
   WearableDashboard,
 } from "../api/types";
 import { DEFAULT_GLUCOSE_TARGET } from "../api/types";
+import {
+  ACTIVITY_INTENSITY_LABELS,
+  ACTIVITY_KIND_LABELS,
+  type ActivityIntensity,
+  type ActivityKind,
+  type ActivityLogEntry,
+  type SleepLogEntry,
+} from "../api/logs";
 import { colors, radii, spacing, typefaces } from "../ui/theme";
 import { DeviceChannels } from "./device-channels";
 import type {
@@ -32,43 +40,7 @@ import { GlucoseReportDetail } from "../glucose/report-detail";
 import { GlucoseTargetSheet } from "../glucose/target-sheet";
 import { openOriginalReport } from "../glucose/open-original";
 import { measuredTimeLabel } from "../glucose/measured-time";
-import Svg, { Circle, Line, Path, Polyline, Rect } from "react-native-svg";
-
-/**
- * 五个分类各给一个小图标。
- *
- * 全部自绘而不是引图标库：这五个形状简单，自绘能保证未选中时线条也清楚，
- * 也省得为一排 chip 去多认一套图标命名。
- */
-function RecordTabIcon({ tab, active }: { tab: RecordTabKey; active: boolean }) {
-  const stroke = active ? colors.paper : colors.muted;
-  const line = {
-    fill: "none" as const,
-    stroke,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    strokeWidth: 1.6,
-  };
-  return (
-    <Svg height={15} viewBox="0 0 24 24" width={15}>
-      {tab === "glucose" ? (
-        <Path d="M12 3.5c2.9 4.4 5.6 7.5 5.6 10.3a5.6 5.6 0 1 1-11.2 0C6.4 11 9.1 7.9 12 3.5Z" {...line} />
-      ) : null}
-      {tab === "meals" ? (
-        <Path d="M4 12.5h16a8 8 0 0 1-16 0Zm8-8.5v3" {...line} />
-      ) : null}
-      {tab === "medication" ? (
-        <Path d="M8.5 8.5h7a3.75 3.75 0 0 1 0 7.5h-7a3.75 3.75 0 0 1 0-7.5Zm.5 0 6 7.5" {...line} />
-      ) : null}
-      {tab === "activity" ? (
-        <Path d="M4 18h8.5l3.5-2 4 2v1H4Zm2-8 3.5-3 3 2.5-4 3.5" {...line} />
-      ) : null}
-      {tab === "sleep" ? (
-        <Path d="M20 14.5A8 8 0 1 1 9.5 4a6.6 6.6 0 0 0 10.5 10.5Z" {...line} />
-      ) : null}
-    </Svg>
-  );
-}
+import Svg, { Circle, Line, Polyline, Rect } from "react-native-svg";
 
 export type RecordTabKey = "glucose" | "meals" | "medication" | "activity" | "sleep";
 
@@ -145,6 +117,30 @@ export function formatMeasuredAt(iso: string): string {
   const hour = `${date.getHours()}`.padStart(2, "0");
   const minute = `${date.getMinutes()}`.padStart(2, "0");
   return `${month}-${day} ${hour}:${minute}`;
+}
+
+/** 一段睡眠的时长：一小时以内只说分钟，整点不说「0 分钟」。 */
+export function formatSleepLength(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return "还不满一分钟";
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = Math.round(minutes % 60);
+  if (hours === 0) {
+    return `约 ${Math.round(minutes)} 分钟`;
+  }
+  return rest === 0 ? `约 ${hours} 小时` : `约 ${hours} 小时 ${rest} 分钟`;
+}
+
+/** 只取钟点：醒来时间挂在「几点睡的」后面，不需要再说一遍哪一天。 */
+export function formatClock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  return `${hour}:${minute}`;
 }
 
 /** 报告只写日期（05-30 至 06-11），不带时刻，所以单独一个格式。 */
@@ -470,6 +466,12 @@ type Props = {
     | "getMealLogs"
     | "createMealLog"
     | "deleteMealLog"
+    | "getActivityLogs"
+    | "recordActivityLog"
+    | "deleteActivityLog"
+    | "getSleepLogs"
+    | "recordSleepLog"
+    | "deleteSleepLog"
     | "getMedicationLogs"
     | "createMedicationLog"
     | "deleteMedicationLog"
@@ -486,7 +488,46 @@ type Props = {
   gadgetbridge: GadgetbridgeController;
   /** tab 切到「记录」时刷新一次：对话里刚记下的饭/药要能立刻出现在列表里。 */
   visible?: boolean;
+  /**
+   * 从别的页跳过来，要求落到某一天的那条记录上（带 id 才重新触发）。
+   *
+   * 目前只有「血糖和你的感觉」在用它：点一行就回到那天到底记了什么。只做跳转和
+   * 标记，不在这里做任何解释，也不自动展开编辑。
+   */
+  focus?: RecordFocus | null;
 };
+
+export type RecordFocus = {
+  /** 要落到哪一刻（ISO 串）。取最接近的一条读数，不要求分秒完全相等。 */
+  at: string;
+  /** 每次点都换一个 id：同一个日期连点两下也要重新触发定位。 */
+  id: number;
+};
+
+/** 和这一条相差十分钟以内都算「那次」，会话里说的时间和库里的时间常差几十秒。 */
+const FOCUS_MATCH_MS = 10 * 60 * 1000;
+
+/** 找出最接近这一刻的那条读数；都不在十分钟内就返回 null。 */
+function nearestReading(
+  readings: GlucoseReading[],
+  at: string,
+): GlucoseReading | null {
+  const time = new Date(at).getTime();
+  if (Number.isNaN(time)) {
+    return null;
+  }
+  let best: { reading: GlucoseReading; gap: number } | null = null;
+  for (const reading of readings) {
+    const gap = Math.abs(new Date(reading.measuredAt).getTime() - time);
+    if (gap > FOCUS_MATCH_MS) {
+      continue;
+    }
+    if (best === null || gap < best.gap) {
+      best = { reading, gap };
+    }
+  }
+  return best === null ? null : best.reading;
+}
 
 /**
  * 记录页：血糖 / 饮食 / 用药 / 运动 / 睡眠。
@@ -501,6 +542,7 @@ export function RecordScreen({
   healthConnect,
   gadgetbridge,
   visible = true,
+  focus = null,
 }: Props) {
   const [tab, setTab] = useState<RecordTabKey>("glucose");
   const [source, setSource] = useState<"manual" | "sensor">("manual");
@@ -526,6 +568,8 @@ export function RecordScreen({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 从心理页点进来的那一刻：列表里把最接近的一条标出来，顶部给一句说明。
+  const [focusedAt, setFocusedAt] = useState<string | null>(null);
 
   const [mealType, setMealType] = useState<"breakfast" | "lunch" | "dinner" | "snack">(
     "lunch",
@@ -538,13 +582,34 @@ export function RecordScreen({
   const [medDose, setMedDose] = useState("");
   const [medKind, setMedKind] = useState<"insulin" | "oral" | "other">("insulin");
 
+  // 运动与睡眠：没戴手环、或者那天手环没电，就靠这两块手填。
+  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
+  const [sleepLogs, setSleepLogs] = useState<SleepLogEntry[]>([]);
+  const [activityKind, setActivityKind] = useState<ActivityKind>("walk");
+  const [activityIntensity, setActivityIntensity] =
+    useState<ActivityIntensity>("moderate");
+  const [activityMinutes, setActivityMinutes] = useState("30");
+  const [activityAt, setActivityAt] = useState<Date>(() => new Date());
+  // 睡眠只问两个时间点：几点睡、几点醒。时长由两个时间算，不让患者再填一遍。
+  const [sleepFellAt, setSleepFellAt] = useState<Date>(
+    () => new Date(Date.now() - 8 * 60 * 60 * 1000),
+  );
+  const [sleepWokeAt, setSleepWokeAt] = useState<Date>(() => new Date());
+
   useEffect(() => {
     if (!visible) {
       return;
     }
     let active = true;
+    // 目标那天可能在 30 天窗口内（双风险只看 30 天），窗口得把它包住；
+    // 默认仍是 14 天，接口上限 90。
+    const focusTime = focus === null ? Number.NaN : new Date(focus.at).getTime();
+    const daysAgo = Number.isNaN(focusTime)
+      ? 0
+      : Math.floor((Date.now() - focusTime) / (24 * 60 * 60 * 1000));
+    const readingDays = Math.min(90, Math.max(14, daysAgo + 2));
     Promise.all([
-      api.getGlucoseReadings(),
+      api.getGlucoseReadings(readingDays),
       api.getGlucoseSummary(),
       api.getMealLogs(),
       api.getMedicationLogs(),
@@ -552,6 +617,9 @@ export function RecordScreen({
       api.getCgmSamples().catch(() => ({ days: 7, count: 0, samples: [] })),
       api.getGlucoseReports().catch(() => [] as GlucoseReport[]),
       api.getGlucoseTarget().catch(() => DEFAULT_GLUCOSE_TARGET),
+      // 补录列表拉不到不影响血糖那几块，各自兜底成空列表。
+      api.getActivityLogs().catch(() => [] as ActivityLogEntry[]),
+      api.getSleepLogs().catch(() => [] as SleepLogEntry[]),
     ])
       .then(
         ([
@@ -563,11 +631,24 @@ export function RecordScreen({
           series,
           reports,
           nextTarget,
+          nextActivity,
+          nextSleep,
         ]) => {
           if (!active) {
             return;
           }
           setReadings(rows);
+          // 定位跟着这一轮数据一起落地：放进 effect 头部直接 setState 会被 lint 拦
+          // （react-hooks/set-state-in-effect），而且数据没回来就标高亮会闪一下。
+          setFocusedAt(focus === null ? null : focus.at);
+          // 落到的那条如果来自报告/传感器，得切到「传感器」子栏，否则高亮在另一栏里，
+          // 患者看到的是「顶上说这是那次记录，列表里却没有」。
+          if (focus !== null) {
+            const hit = nearestReading(rows, focus.at);
+            if (hit !== null) {
+              setSource(hit.source === "report" || hit.source === "cgm" ? "sensor" : "manual");
+            }
+          }
           setSummary(nextSummary);
           setMeals(nextMeals);
           setMedications(nextMedications);
@@ -575,6 +656,8 @@ export function RecordScreen({
           setCgmSamples(series.samples);
           setGlucoseReports(reports);
           setTarget(nextTarget);
+          setActivityLogs(nextActivity);
+          setSleepLogs(nextSleep);
           // 趋势图的「近 7 天」以取到数据的那一刻为锚点：放在渲染里算 Date.now()
           // 会让每次重渲染都换一个时间轴，图会自己抖。
           setTrendNow(Date.now());
@@ -594,7 +677,7 @@ export function RecordScreen({
     return () => {
       active = false;
     };
-  }, [api, visible]);
+  }, [api, visible, focus]);
 
   // 「传感器」那一栏只看导入进来的 CGM；指尖血/化验单留在「手动」。
   const manualReadings = readings.filter(
@@ -605,6 +688,9 @@ export function RecordScreen({
   const reportReadings = readings.filter(
     (reading) => reading.source === "report" || reading.source === "cgm",
   );
+  // 落到那天的那一条：多条时取最接近的。找不到就是 null，界面会直说「可能已经删掉了」。
+  const focusedReadingId =
+    focusedAt === null ? null : (nearestReading(readings, focusedAt)?.id ?? null);
   const cgmSampleStats =
     cgmSamples.length === 0
       ? null
@@ -684,7 +770,8 @@ export function RecordScreen({
     }
   }
 
-  async function saveMedication() {    setSaving(true);
+  async function saveMedication() {
+    setSaving(true);
     try {
       const created = await api.createMedicationLog({
         takenAt: medAt.toISOString(),
@@ -700,6 +787,69 @@ export function RecordScreen({
       setError(cause instanceof Error ? cause.message : "这条用药没记上");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveActivity() {
+    const minutes = Number(activityMinutes);
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      setError("运动时长要填个数字，至少 1 分钟");
+      return;
+    }
+    setSaving(true);
+    try {
+      const created = await api.recordActivityLog({
+        performedAt: activityAt.toISOString(),
+        kind: activityKind,
+        minutes: Math.round(minutes),
+        intensity: activityIntensity,
+      });
+      setActivityLogs((current) => [created, ...current]);
+      setActivityMinutes("30");
+      setActivityAt(new Date());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "这次运动没记上");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveSleep() {
+    if (sleepWokeAt.getTime() <= sleepFellAt.getTime()) {
+      setError("醒来时间要晚于入睡时间");
+      return;
+    }
+    setSaving(true);
+    try {
+      const created = await api.recordSleepLog({
+        fellAsleepAt: sleepFellAt.toISOString(),
+        wokeAt: sleepWokeAt.toISOString(),
+      });
+      setSleepLogs((current) => [created, ...current]);
+      setSleepFellAt(new Date(Date.now() - 8 * 60 * 60 * 1000));
+      setSleepWokeAt(new Date());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "这段睡眠没记上");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeActivity(log: ActivityLogEntry) {
+    try {
+      await api.deleteActivityLog(log.id);
+      setActivityLogs((current) => current.filter((item) => item.id !== log.id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "这条运动记录没删掉");
+    }
+  }
+
+  async function removeSleep(log: SleepLogEntry) {
+    try {
+      await api.deleteSleepLog(log.id);
+      setSleepLogs((current) => current.filter((item) => item.id !== log.id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "这段睡眠记录没删掉");
     }
   }
 
@@ -729,7 +879,8 @@ export function RecordScreen({
         <Text style={styles.headerHint}>最近 7 天</Text>
       </View>
 
-      {/* 五个分类芯片：不横向滚动，放不下就换行——横向滚动会把「睡眠」切掉半个。 */}
+      {/* 五个分类是五块并列的页，不是五个筛选条件：五个字并排等宽，
+          选中靠底下一条短线，不留胶囊底色——胶囊一多，上面就成了一堵墙。 */}
       <View style={styles.tabRow}>
         {RECORD_TABS.map((item) => {
           const selected = item.key === tab;
@@ -740,12 +891,12 @@ export function RecordScreen({
               accessibilityState={{ selected }}
               accessibilityLabel={`${item.label}分类`}
               onPress={() => setTab(item.key)}
-              style={[styles.tab, selected ? styles.tabActive : null]}
+              style={styles.tab}
             >
-              <RecordTabIcon active={selected} tab={item.key} />
               <Text style={[styles.tabText, selected ? styles.tabTextActive : null]}>
                 {item.label}
               </Text>
+              <View style={[styles.tabUnderline, selected ? styles.tabUnderlineActive : null]} />
             </Pressable>
           );
         })}
@@ -801,6 +952,26 @@ export function RecordScreen({
               ))}
             </View>
 
+            {/* 从「血糖和你的感觉」点进来时，先说清落到了哪一次；找不到也要说清，
+                不能让患者自己在一列卡片里猜哪条是刚才点的。 */}
+            {focusedAt === null ? null : (
+              <View style={styles.focusBar}>
+                <Text style={styles.focusBarText}>
+                  {focusedReadingId === null
+                    ? `${measuredTimeLabel(focusedAt, undefined)} 那次没找到读数，可能已经删掉了`
+                    : `这是 ${measuredTimeLabel(focusedAt, undefined)} 那次的记录`}
+                </Text>
+                <Pressable
+                  accessibilityLabel="取消定位"
+                  accessibilityRole="button"
+                  onPress={() => setFocusedAt(null)}
+                  style={styles.focusBarClose}
+                >
+                  <Text style={styles.focusBarCloseText}>×</Text>
+                </Pressable>
+              </View>
+            )}
+
             {/* 两个子栏共用一张趋势图：手输的点、报告里的点都在这条线上，
                 切到哪一栏都看得见自己最近的高低起伏。 */}
             <GlucoseTrend now={trendNow} readings={readings} target={target} />
@@ -844,7 +1015,13 @@ export function RecordScreen({
                   </View>
                 ) : null}
                 {manualReadings.map((reading) => (
-                  <View key={reading.id} style={styles.card}>
+                  <View
+                    key={reading.id}
+                    style={[
+                      styles.card,
+                      reading.id === focusedReadingId ? styles.cardFocused : null,
+                    ]}
+                  >
                     <Text style={styles.cardTitle}>{formatGlucose(reading)}</Text>
                     <Text style={styles.cardBody}>
                        测量{" "}
@@ -911,7 +1088,13 @@ export function RecordScreen({
                   </Pressable>
                 ))}
                 {reportReadings.slice(0, 5).map((reading) => (
-                  <View key={reading.id} style={styles.card}>
+                  <View
+                    key={reading.id}
+                    style={[
+                      styles.card,
+                      reading.id === focusedReadingId ? styles.cardFocused : null,
+                    ]}
+                  >
                     <Text style={styles.cardTitle}>{formatGlucose(reading)}</Text>
                     <Text style={styles.cardBody}>
                       {measuredTimeLabel(
@@ -1218,6 +1401,113 @@ export function RecordScreen({
 
         {tab === "activity" ? (
           <>
+            {activityLogs.length === 0 ? (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>还没有自己补记的运动</Text>
+                <Text style={styles.cardBody}>
+                  没戴手环、或者那天手环没电，就在下面补一条：做了什么、多久、什么时候。
+                </Text>
+              </View>
+            ) : null}
+            {activityLogs.map((log) => (
+              <View key={log.id} style={styles.card}>
+                <Text style={styles.cardTitle}>
+                  {`${ACTIVITY_KIND_LABELS[log.kind]} · ${log.minutes} 分钟`}
+                </Text>
+                <Text style={styles.cardBody}>
+                  {formatMeasuredAt(log.performedAt)} · 强度
+                  {ACTIVITY_INTENSITY_LABELS[log.intensity]}
+                  {log.note === null ? "" : ` · ${log.note}`}
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="删除这条运动记录"
+                  onPress={() => void removeActivity(log)}
+                >
+                  <Text style={styles.linkDanger}>删除</Text>
+                </Pressable>
+              </View>
+            ))}
+
+            <View style={styles.form}>
+              <Text style={styles.formTitle}>补记一次运动</Text>
+              <Text style={styles.formCaption}>做了什么</Text>
+              <View style={styles.chipRow}>
+                {(Object.keys(ACTIVITY_KIND_LABELS) as ActivityKind[]).map((key) => (
+                  <Pressable
+                    key={key}
+                    accessibilityRole="button"
+                    accessibilityLabel={`运动类型${ACTIVITY_KIND_LABELS[key]}`}
+                    onPress={() => setActivityKind(key)}
+                    style={[styles.chip, activityKind === key ? styles.chipActive : null]}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        activityKind === key ? styles.chipTextActive : null,
+                      ]}
+                    >
+                      {ACTIVITY_KIND_LABELS[key]}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={styles.formCaption}>多久、多用力</Text>
+              <View style={styles.chipRow}>
+                <TextInput
+                  accessibilityLabel="运动时长（分钟）"
+                  placeholder="分钟"
+                  placeholderTextColor={colors.faint}
+                  value={activityMinutes}
+                  onChangeText={setActivityMinutes}
+                  keyboardType="number-pad"
+                  style={[styles.input, styles.inputNarrow]}
+                  maxLength={3}
+                />
+                <View style={[styles.segment, styles.segmentInline]}>
+                  {(Object.keys(ACTIVITY_INTENSITY_LABELS) as ActivityIntensity[]).map(
+                    (key) => (
+                      <Pressable
+                        key={key}
+                        accessibilityRole="button"
+                        accessibilityLabel={`运动强度${ACTIVITY_INTENSITY_LABELS[key]}`}
+                        accessibilityState={{ selected: activityIntensity === key }}
+                        onPress={() => setActivityIntensity(key)}
+                        style={[
+                          styles.segmentItem,
+                          activityIntensity === key ? styles.segmentItemActive : null,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.segmentText,
+                            activityIntensity === key ? styles.segmentTextActive : null,
+                          ]}
+                        >
+                          {ACTIVITY_INTENSITY_LABELS[key]}
+                        </Text>
+                      </Pressable>
+                    ),
+                  )}
+                </View>
+              </View>
+              <EventTimeField
+                accessibilityLabel="这次运动是什么时候"
+                label="这次运动是什么时候"
+                onChange={setActivityAt}
+                value={activityAt}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="保存这次运动"
+                onPress={() => void saveActivity()}
+                disabled={saving}
+                style={[styles.primaryButton, saving ? styles.buttonDisabled : null]}
+              >
+                <Text style={styles.primaryButtonText}>保存这次运动</Text>
+              </Pressable>
+            </View>
+
             <View style={styles.metricCard}>
               <Text style={styles.metricLabel}>近 7 天步数</Text>
               <Text style={styles.metricValue}>
@@ -1225,18 +1515,18 @@ export function RecordScreen({
                 <Text style={styles.metricUnit}> 步</Text>
               </Text>
               <Text style={styles.cardHint}>
-                数据来自手环导入（华为运动健康 / Health Connect），不需要再手填。
+                手环导入的数据（华为运动健康 / Health Connect）和上面手填的分开记，不会互相覆盖。
               </Text>
             </View>
             <View style={styles.metricRow}>
               <View style={[styles.metricSmall, styles.metricSmallPrimary]}>
-                <Text style={styles.metricSmallLabel}>活动</Text>
+                <Text style={styles.metricSmallLabel}>手环活动</Text>
                 <Text style={styles.metricSmallValue}>
                   {totalSteps > 0 ? "有记录" : "暂无"}
                 </Text>
               </View>
               <View style={[styles.metricSmall, styles.metricSmallSleep]}>
-                <Text style={styles.metricSmallLabel}>睡眠</Text>
+                <Text style={styles.metricSmallLabel}>手环睡眠</Text>
                 <Text style={styles.metricSmallValue}>
                   {sleepMinutes > 0 ? `${Math.round(sleepMinutes / 60)} 小时` : "暂无"}
                 </Text>
@@ -1253,19 +1543,76 @@ export function RecordScreen({
 
         {tab === "sleep" ? (
           <>
+            {sleepLogs.length === 0 ? (
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>还没有自己补记的睡眠</Text>
+                <Text style={styles.cardBody}>
+                  只问两个时间：几点睡、几点醒。中间醒过几次不用记，那样反而记不准。
+                </Text>
+              </View>
+            ) : null}
+            {sleepLogs.map((log) => (
+              <View key={log.id} style={styles.card}>
+                <Text style={styles.cardTitle}>
+                  {formatSleepLength(log.minutes)}
+                </Text>
+                <Text style={styles.cardBody}>
+                  {formatMeasuredAt(log.fellAsleepAt)} 睡 → {formatClock(log.wokeAt)} 醒
+                  {log.note === null ? "" : ` · ${log.note}`}
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="删除这段睡眠记录"
+                  onPress={() => void removeSleep(log)}
+                >
+                  <Text style={styles.linkDanger}>删除</Text>
+                </Pressable>
+              </View>
+            ))}
+
+            <View style={styles.form}>
+              <Text style={styles.formTitle}>补记一段睡眠</Text>
+              <EventTimeField
+                accessibilityLabel="几点睡的"
+                label="几点睡的"
+                onChange={setSleepFellAt}
+                value={sleepFellAt}
+              />
+              <EventTimeField
+                accessibilityLabel="几点醒的"
+                label="几点醒的"
+                onChange={setSleepWokeAt}
+                value={sleepWokeAt}
+              />
+              <Text style={styles.formHint}>
+                这一段算 {formatSleepLength(Math.round((sleepWokeAt.getTime() - sleepFellAt.getTime()) / 60_000))}。
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="保存这段睡眠"
+                onPress={() => void saveSleep()}
+                disabled={saving}
+                style={[styles.primaryButton, saving ? styles.buttonDisabled : null]}
+              >
+                <Text style={styles.primaryButtonText}>保存这段睡眠</Text>
+              </Pressable>
+            </View>
+
             <View style={styles.metricCard}>
-              <Text style={styles.metricLabel}>近 7 天睡眠</Text>
+              <Text style={styles.metricLabel}>近 7 天睡眠（手环）</Text>
               <Text style={styles.metricValue}>
                 {sleepMinutes > 0 ? `约 ${Math.round(sleepMinutes / 60)} 小时` : "—"}
               </Text>
               <Text style={styles.cardBody}>
                 {sleepSessions > 0 ? `共 ${sleepSessions} 段` : "还没有导入睡眠数据"}
               </Text>
-              <Text style={styles.cardHint}>来自手环导入，不用手动填。</Text>
+              <Text style={styles.cardHint}>
+                手环导入的睡眠和上面手填的分开记；手环没电那晚就用上面补一条。
+              </Text>
             </View>
             <View style={styles.metricRow}>
               <View style={[styles.metricSmall, styles.metricSmallSleep]}>
-                <Text style={styles.metricSmallLabel}>平均每段</Text>
+                <Text style={styles.metricSmallLabel}>手环平均每段</Text>
                 <Text style={styles.metricSmallValue}>
                   {sleepSessions > 0
                     ? `约 ${Math.max(1, Math.round(sleepMinutes / sleepSessions / 60))} 小时`
@@ -1273,7 +1620,7 @@ export function RecordScreen({
                 </Text>
               </View>
               <View style={[styles.metricSmall, styles.metricSmallPrimary]}>
-                <Text style={styles.metricSmallLabel}>数据段</Text>
+                <Text style={styles.metricSmallLabel}>手环数据段</Text>
                 <Text style={styles.metricSmallValue}>{sleepSessions} 段</Text>
               </View>
             </View>
@@ -1330,30 +1677,33 @@ const styles = StyleSheet.create({
   },
   tabRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingTop: 2,
+    paddingHorizontal: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line,
   },
   tab: {
-    flexDirection: "row",
+    flex: 1,
     alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: radii.pill,
-    backgroundColor: colors.paperMuted,
+    gap: 6,
+    paddingTop: 6,
+    paddingBottom: 8,
   },
-  tabActive: {
+  tabUnderline: {
+    width: 18,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: "transparent",
+  },
+  tabUnderlineActive: {
     backgroundColor: colors.primary,
   },
   tabText: {
     color: colors.muted,
     fontFamily: typefaces.sans,
-    fontSize: 12,
+    fontSize: 13,
   },
   tabTextActive: {
-    color: "#FFFFFF",
+    color: colors.ink,
     fontFamily: typefaces.sansMedium,
     fontWeight: "600",
   },
@@ -1525,6 +1875,36 @@ const styles = StyleSheet.create({
     fontFamily: typefaces.sans,
     fontSize: 12.5,
   },
+  // 定位到某一天时顶上那一句；浅色底、不抢眼，但比旁边卡片明显。
+  focusBar: {
+    alignItems: "center",
+    backgroundColor: colors.paperMuted,
+    borderRadius: radii.md,
+    flexDirection: "row",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  focusBarText: {
+    color: colors.ink,
+    flex: 1,
+    fontFamily: typefaces.sans,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  focusBarClose: {
+    paddingHorizontal: spacing.xs,
+  },
+  focusBarCloseText: {
+    color: colors.muted,
+    fontSize: 18,
+    lineHeight: 20,
+  },
+  // 被定位的那一条：只加一圈边框，不改底色，免得看起来像「标成异常」。
+  cardFocused: {
+    borderColor: colors.primary,
+    borderWidth: 1.5,
+  },
   linkDanger: {
     color: colors.danger,
     fontFamily: typefaces.sans,
@@ -1552,6 +1932,12 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     lineHeight: 17,
   },
+  formCaption: {
+    color: colors.faint,
+    fontFamily: typefaces.sans,
+    fontSize: 11.5,
+    letterSpacing: 0.3,
+  },
   chipRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1559,23 +1945,29 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   chip: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
     borderRadius: radii.pill,
-    backgroundColor: colors.paperMuted,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "transparent",
   },
   chipActive: {
+    borderColor: colors.primary,
     backgroundColor: colors.primarySoft,
   },
   chipText: {
     color: colors.muted,
     fontFamily: typefaces.sans,
-    fontSize: 12,
+    fontSize: 12.5,
   },
   chipTextActive: {
     color: colors.primaryPressed,
     fontFamily: typefaces.sansMedium,
     fontWeight: "600",
+  },
+  segmentInline: {
+    flex: 1,
   },
   input: {
     borderWidth: StyleSheet.hairlineWidth,

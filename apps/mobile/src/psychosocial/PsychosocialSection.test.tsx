@@ -71,13 +71,38 @@ function profile(overrides: Partial<PsychosocialProfile> = {}): PsychosocialProf
   };
 }
 
+function who5Instrument(): PsychosocialInstrument {
+  return {
+    id: 'who5',
+    title: '这两周过得怎么样',
+    instructions: '五句话，回忆最近两周。',
+    disclaimer: '世界卫生组织五项身心健康指数（WHO-5），不是诊断工具。',
+    options: [
+      { value: 5, label: '一直' },
+      { value: 0, label: '从未' },
+    ],
+    questions: [
+      { id: 'cheerful', kind: 'behavior', text: '我感到愉快、情绪好。' },
+      { id: 'calm', kind: 'behavior', text: '我感到平静、放松。' },
+      { id: 'active', kind: 'behavior', text: '我感到有活力。' },
+      { id: 'rested', kind: 'behavior', text: '我醒来觉得休息够了。' },
+      { id: 'interested', kind: 'behavior', text: '我的日常有让我感兴趣的事。' },
+    ],
+    goldLabel: '',
+    goldHint: '',
+    goldOptions: [],
+  };
+}
+
 function buildApi(
   existing: PsychosocialProfile | null,
   questions: PsychosocialInstrument = instrument(),
+  who5: PsychosocialInstrument | null = null,
 ) {
   return {
     getPsychosocialInstrument: jest.fn().mockResolvedValue(questions),
     getPsychosocialAssessment: jest.fn().mockResolvedValue(existing),
+    getWho5Instrument: jest.fn().mockResolvedValue(who5),
     recordPsychosocialAssessment: jest.fn().mockResolvedValue(profile()),
   };
 }
@@ -267,5 +292,91 @@ describe('PsychosocialSection', () => {
     // 不向用户复述分数或量表名。
     expect(text).not.toContain('HFS');
     expect(text).not.toContain('75');
+  });
+
+  it('世卫那五句全答完才一起交上去', async () => {
+    const api = buildApi(null, instrument(), who5Instrument());
+    const tree = await render(api);
+    press(tree, '开始填写');
+
+    expect(treeText(tree)).toContain('这两周过得怎么样');
+    expect(treeText(tree)).toContain('这五句是选填的，跳过也行。');
+
+    // 主问卷七题先答完。
+    for (let index = 0; index < 6; index += 1) {
+      act(() => {
+        radios(tree)[index * 5].props.onPress();
+      });
+    }
+    act(() => {
+      radios(tree)[30 + 0].props.onPress();
+    });
+
+    const who5Radio = (label: string) => {
+      const found = tree.root.findAll(
+        (node) =>
+          node.props?.accessibilityRole === 'radio' &&
+          node.props?.accessibilityLabel === label,
+      );
+      if (found.length === 0) throw new Error(`找不到选项：${label}`);
+      return found[0];
+    };
+
+    for (const question of who5Instrument().questions) {
+      act(() => {
+        who5Radio(`${question.text} 一直`).props.onPress();
+      });
+    }
+    expect(treeText(tree)).toContain('这五句也答完了。');
+
+    await act(async () => {
+      findPressable(tree, '保存').props.onPress();
+    });
+
+    const input = api.recordPsychosocialAssessment.mock.calls[0][0];
+    expect(input.who5Answers).toHaveLength(5);
+    expect(input.who5Answers[0]).toEqual({ id: 'cheerful', value: 5 });
+  });
+
+  it('世卫那五句只答了一半就不让保存，也不假装那道题答完了', async () => {
+    const api = buildApi(null, instrument(), who5Instrument());
+    const tree = await render(api);
+    press(tree, '开始填写');
+
+    for (let index = 0; index < 6; index += 1) {
+      act(() => {
+        radios(tree)[index * 5].props.onPress();
+      });
+    }
+    act(() => {
+      radios(tree)[30 + 0].props.onPress();
+    });
+
+    act(() => {
+      tree.root
+        .findAll(
+          (node) =>
+            node.props?.accessibilityRole === 'radio' &&
+            node.props?.accessibilityLabel === '我感到愉快、情绪好。 一直',
+        )[0]
+        .props.onPress();
+    });
+
+    expect(treeText(tree)).toContain('还有 4 句没选。');
+    expect(treeText(tree)).toContain('上面那五句要么全答、要么全空着。');
+    expect(
+      findPressable(tree, '保存').props.accessibilityState?.disabled,
+    ).toBe(true);
+  });
+
+  it('读不到世卫题库时整块不显示，也不影响主问卷', async () => {
+    const api = buildApi(null);
+    api.getWho5Instrument.mockRejectedValue(new Error('404'));
+    const tree = await render(api);
+    press(tree, '开始填写');
+
+    const text = treeText(tree);
+    expect(text).not.toContain('这两周过得怎么样');
+    expect(text).toContain('反复测血糖');
   });
 });

@@ -24,7 +24,7 @@ import { LiveHeartRateProvider } from "./src/live-heart-rate/LiveHeartRateProvid
 import { AppTabBar, type AppTabKey } from "./src/navigation/tab-bar";
 import { MindScreen } from "./src/navigation/mind-screen";
 import { ProfileScreen } from "./src/navigation/profile-screen";
-import { RecordScreen } from "./src/navigation/record-screen";
+import { RecordScreen, type RecordFocus } from "./src/navigation/record-screen";
 import { ClinicianScreen } from "./src/patient-access/patient-access-screen";
 import { DeleteAccountScreen } from "./src/settings/delete-account-screen";
 import { exportAndShare } from "./src/settings/export-data";
@@ -209,7 +209,9 @@ function PatientShell({
   } | null>(null);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [recordFocus, setRecordFocus] = useState<RecordFocus | null>(null);
   const nextPageId = useRef(0);
+  const nextFocusId = useRef(0);
 
   // 手环两条通道挂在 shell 上：聊天页要用它们（关怀设置、看板刷新、实时心率），
   // 记录页要用它们展示连接状态，一处创建避免两个实例各自轮询、互相覆盖状态。
@@ -220,6 +222,16 @@ function PatientShell({
     nextPageId.current += 1;
     setPageRequest({ page, id: nextPageId.current });
     setTab("chat");
+  }, []);
+
+  /**
+   * 从「心理」页点某一行：切到记录页，并把「落到哪一刻」带过去。
+   * 用自增 id 让同一个日期连点两下也能重新触发定位。
+   */
+  const openRecordAt = useCallback((at: string) => {
+    nextFocusId.current += 1;
+    setRecordFocus({ at, id: nextFocusId.current });
+    setTab("records");
   }, []);
 
   const signOut = useCallback(async () => {
@@ -275,6 +287,7 @@ function PatientShell({
         >
           <RecordScreen
             api={api}
+            focus={recordFocus}
             gadgetbridge={gadgetbridge}
             healthConnect={healthConnect}
             onImport={() => openPage("importSensor")}
@@ -289,6 +302,7 @@ function PatientShell({
           <MindScreen
             api={api}
             onOpenCareSettings={() => openPage("care")}
+            onOpenRecord={openRecordAt}
             visible={tab === "mind"}
           />
         </View>

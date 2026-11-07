@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, cast
 from uuid import UUID
@@ -35,8 +36,17 @@ from antang_api.database import (
 from antang_api.health_profile.service import load_health_profile_snapshot
 from antang_api.psychosocial import (
     read_latest_assessment,
+    recent_annotations,
     render_guidance,
+    render_sensation_context,
 )
+from antang_api.psychosocial.dual_risk import SENSATION_LOOKBACK, needs_follow_up
+from antang_api.psychosocial.graphs import (
+    choose_focus,
+    graph_snapshot,
+    render_graph_focus,
+)
+from antang_api.psychosocial.two_draft import numbers_in, refine_wording
 from antang_api.models import (
     AgentRun,
     AgentRunStatus,
@@ -55,17 +65,28 @@ from antang_api.models import (
     PushDeliveryStatus,
     PushInstallation,
     PushPermissionState,
+    RiskAnnotation,
     RoutineCareCadence,
+)
+from antang_api.proactive_care.behavior_signals import (
+    BehaviorSignal,
+    behavior_signals,
 )
 from antang_api.proactive_care.heart_rate_shadow import (
     HeartRateShadowResult,
     evaluate_heart_rate_shadow,
 )
+from antang_api.proactive_care.actions import suggested_action
 from antang_api.proactive_care.quota import weekly_quota
+from antang_api.proactive_care.refine import Refiner
+from antang_api.proactive_care.reasons import message_reason
+from antang_api.proactive_care.topics import topic_cooldown_until, topic_prefix
 from antang_api.proactive_care.service import (
     has_scheduled_routine_replacement,
     schedule_routine_check_in,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_PROACTIVE_INPUT_TOKENS = 20_000
 ORDINARY_CONTACT_INTERVAL = timedelta(hours=24)
@@ -139,6 +160,7 @@ class ProactiveCareProcessor:
         token_model: BaseChatModel,
         model_name: str,
         sessions: async_sessionmaker[AsyncSession] = default_session_factory,
+        refiner: Refiner | None = None,
     ) -> None:
         if not model_name.strip():
             raise ValueError("主动关怀 model_name 不能为空")
@@ -148,6 +170,7 @@ class ProactiveCareProcessor:
         self._token_model = token_model
         self._model_name = model_name
         self._sessions = sessions
+        self._refiner = refiner
 
     async def process(self, task_id: UUID, lease_token: UUID) -> None:
         """处理一次已经由 Worker 领取的任务。"""
@@ -174,6 +197,8 @@ class ProactiveCareProcessor:
 
             plan: CarePlan | None = None
             heart_rate_result: HeartRateShadowResult | None = None
+            behavior_signal: BehaviorSignal | None = None
+            dual_risk: RiskAnnotation | None = None
             if task.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN:
                 if care_settings.routine_cadence == RoutineCareCadence.DISABLED:
                     _end_claim(
@@ -207,6 +232,71 @@ class ProactiveCareProcessor:
                     )
                     await session.commit()
                     return
+            elif task.kind == ProactiveCareTaskKind.BEHAVIOR_SIGNAL:
+                # 行为痕迹不是内部错误：开关关着就作废，不重排——重排也只会在
+                # 同一处再挡一次。
+                if not care_settings.health_events_enabled:
+                    _end_claim(
+                        task,
+                        status=ProactiveCareTaskStatus.CANCELLED,
+                        reason="health_events_disabled",
+                        now=now,
+                    )
+                    await session.commit()
+                    return
+                # 排队到真正发送之间可能隔了几个小时，那时他也许已经不这样了：
+                # 现算一遍，还对得上才发。
+                expected_kind = (task.health_event_key or "").removeprefix("behavior:")
+                matched = [
+                    signal
+                    for signal in await behavior_signals(
+                        session,
+                        user_id=task.user_id,
+                        now=now,
+                        timezone_name=care_settings.timezone,
+                    )
+                    if signal.kind == expected_kind
+                ]
+                if not matched:
+                    _end_claim(
+                        task,
+                        status=ProactiveCareTaskStatus.SKIPPED,
+                        reason="behavior_signal_gone",
+                        now=now,
+                    )
+                    await session.commit()
+                    return
+                behavior_signal = matched[0]
+            elif task.kind == ProactiveCareTaskKind.DUAL_RISK_FOLLOW_UP:
+                if not care_settings.health_events_enabled:
+                    _end_claim(
+                        task,
+                        status=ProactiveCareTaskStatus.CANCELLED,
+                        reason="health_events_disabled",
+                        now=now,
+                    )
+                    await session.commit()
+                    return
+                dual_risk = await session.get(
+                    RiskAnnotation,
+                    UUID(
+                        (task.health_event_key or "").removeprefix("dual-risk:")
+                    ),
+                )
+                if (
+                    dual_risk is None
+                    or dual_risk.user_id != task.user_id
+                    or not needs_follow_up(dual_risk)
+                ):
+                    # 那条记录已经删了，或者它本来就不是「低了没感觉」：不问了。
+                    _end_claim(
+                        task,
+                        status=ProactiveCareTaskStatus.SKIPPED,
+                        reason="dual_risk_gone",
+                        now=now,
+                    )
+                    await session.commit()
+                    return
             else:
                 if not care_settings.health_events_enabled:
                     _end_claim(
@@ -232,6 +322,33 @@ class ProactiveCareProcessor:
                         reason=f"shadow_{heart_rate_result.reason}",
                         now=now,
                     )
+                    await session.commit()
+                    return
+                # 同一话题刚提过就往后推：心率这类事件会反复出现，天天问一遍
+                # 就变成背景噪音，真正要紧的那次反而没人看。
+                resumes_at = await topic_cooldown_until(
+                    session,
+                    user_id=task.user_id,
+                    prefix=topic_prefix(heart_rate_result.event_key),
+                    now=now,
+                )
+                if resumes_at is not None:
+                    if resumes_at >= task.expires_at:
+                        _end_claim(
+                            task,
+                            status=ProactiveCareTaskStatus.EXPIRED,
+                            reason="topic_cooldown_expired",
+                            now=now,
+                        )
+                    else:
+                        task.attempt_count -= 1
+                        _end_claim(
+                            task,
+                            status=ProactiveCareTaskStatus.SCHEDULED,
+                            reason="topic_cooldown",
+                            now=now,
+                            due_at=resumes_at,
+                        )
                     await session.commit()
                     return
 
@@ -276,7 +393,11 @@ class ProactiveCareProcessor:
                 await session.commit()
                 return
 
-            if task.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN:
+            if task.kind in (
+                ProactiveCareTaskKind.ROUTINE_CHECK_IN,
+                ProactiveCareTaskKind.BEHAVIOR_SIGNAL,
+                ProactiveCareTaskKind.DUAL_RISK_FOLLOW_UP,
+            ):
                 quota = await weekly_quota(
                     session,
                     user_id=task.user_id,
@@ -290,6 +411,20 @@ class ProactiveCareProcessor:
                         raise RuntimeError(
                             "每周主动联系额度用完了，却算不出下一次的可用时间"
                         )
+                    if task.kind in (
+                        ProactiveCareTaskKind.BEHAVIOR_SIGNAL,
+                        ProactiveCareTaskKind.DUAL_RISK_FOLLOW_UP,
+                    ):
+                        # 行为痕迹和双风险回访都不是非发不可：额度用完就作废，
+                        # 不占位、不重排——挪到下周再问那三天前的事已经没有意义。
+                        _end_claim(
+                            task,
+                            status=ProactiveCareTaskStatus.EXPIRED,
+                            reason="weekly_contact_limit_expired",
+                            now=now,
+                        )
+                        await session.commit()
+                        return
                     if resumes_at >= task.expires_at:
                         _end_claim(
                             task,
@@ -358,15 +493,24 @@ class ProactiveCareProcessor:
                                 reason="ordinary_contact_limit_expired",
                                 now=now,
                             )
-                            await schedule_routine_check_in(
-                                session,
-                                user_id=task.user_id,
-                                after=now,
-                                reset_existing=False,
-                            )
+                            if task.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN:
+                                await schedule_routine_check_in(
+                                    session,
+                                    user_id=task.user_id,
+                                    after=now,
+                                    reset_existing=False,
+                                )
                         else:
                             task.attempt_count -= 1
-                            if await has_scheduled_routine_replacement(session, task):
+                            if task.kind == ProactiveCareTaskKind.BEHAVIOR_SIGNAL:
+                                _end_claim(
+                                    task,
+                                    status=ProactiveCareTaskStatus.SCHEDULED,
+                                    reason="ordinary_contact_limit",
+                                    now=now,
+                                    due_at=next_contact_at,
+                                )
+                            elif await has_scheduled_routine_replacement(session, task):
                                 _end_claim(
                                     task,
                                     status=ProactiveCareTaskStatus.CANCELLED,
@@ -482,6 +626,44 @@ class ProactiveCareProcessor:
                     "plan_revision": plan.revision,
                 }
                 memory_query = plan.summary
+            elif task.kind == ProactiveCareTaskKind.BEHAVIOR_SIGNAL:
+                if behavior_signal is None:
+                    raise RuntimeError("行为痕迹任务缺少候选")
+                trigger = {
+                    "kind": task.kind.value,
+                    "rule_id": task.rule_id,
+                    "rule_version": task.rule_version,
+                    "signal": behavior_signal.kind,
+                    "signal_label": behavior_signal.label,
+                    "occurred": behavior_signal.occurred,
+                    "window_days": behavior_signal.window_days,
+                    # 次数只给模型做判断用，不许写进消息里。
+                    "never_mention_counts": True,
+                }
+                memory_query = behavior_signal.label
+            elif task.kind == ProactiveCareTaskKind.DUAL_RISK_FOLLOW_UP:
+                if dual_risk is None:
+                    raise RuntimeError("双风险回访任务缺少标注")
+                local_zone = ZoneInfo(care_settings.timezone)
+                measured = dual_risk.measured_at.astimezone(local_zone)
+                number_text = (
+                    "没有说具体数值"
+                    if dual_risk.value_mg_dl is None
+                    else f"{dual_risk.value_mg_dl / 18:.1f} mmol/L"
+                )
+                trigger = {
+                    "kind": task.kind.value,
+                    "rule_id": task.rule_id,
+                    "rule_version": task.rule_version,
+                    "measured_at": measured.isoformat(),
+                    "value_text": number_text,
+                    "label": dual_risk.label,
+                    # 只许问后来怎么样；不许把「你没感觉到」当成一次要补的课，
+                    # 也不许报「这已经是第几次」。
+                    "never_mention_counts": True,
+                    "ask_about_since_then": True,
+                }
+                memory_query = "那天没有感觉到低血糖"
             else:
                 if (
                     heart_rate_result is None
@@ -535,6 +717,27 @@ class ProactiveCareProcessor:
                 }
                 memory_query = f"{direction_text}心率后的关怀"
 
+            # 有多少次「低下去却没感觉」：决定要不要递上「带两颗糖」这件小事。
+            silent_lows_count = 0
+            raw_lows = (task.health_evidence or {}).get("silent_lows_30d", 0)
+            if isinstance(raw_lows, int):
+                silent_lows_count = raw_lows
+            elif dual_risk is not None:
+                silent_lows_count = 1
+
+            # 图有用的时候才有用：话题由它来挑，但挑不出来不许硬凑。
+            graph_focus_text = ""
+            if task.kind == ProactiveCareTaskKind.ROUTINE_CHECK_IN:
+                mentioned = tuple(
+                    message.content for message in recent_messages[-6:]
+                )
+                graph_focus_text = render_graph_focus(
+                    choose_focus(
+                        await graph_snapshot(session, user_id=task.user_id),
+                        mentioned=mentioned,
+                    )
+                )
+
             context_payload: dict[str, Any] = {
                 "must_send": True,
                 "trigger": trigger,
@@ -572,7 +775,30 @@ class ProactiveCareProcessor:
                 "behavior_context": render_behavior_context(
                     await read_fear_summary(session, user_id=task.user_id),
                 ),
+                # 他有过「血糖低下去、身上没报警」的时刻时，该问的是感觉，不是数字。
+                "sensation_context": render_sensation_context(
+                    await recent_annotations(
+                        session,
+                        user_id=task.user_id,
+                        since=datetime.now(timezone.utc) - SENSATION_LOOKBACK,
+                        limit=10,
+                    ),
+                ),
             }
+
+            action = suggested_action(
+                kind=task.kind,
+                signal=behavior_signal,
+                silent_lows=silent_lows_count,
+            )
+            if action is not None:
+                # 一句话之后给一件今天就能做的小事；给不出来就不硬凑。
+                context_payload["suggested_action"] = {
+                    "text": action.text,
+                    "why": action.why,
+                }
+            if graph_focus_text:
+                context_payload["graph_focus"] = graph_focus_text
 
             root_run = AgentRun(
                 user_id=task.user_id,
@@ -649,6 +875,24 @@ class ProactiveCareProcessor:
                 decision_error = "心率关怀 Agent 只能生成一句简短问题"
             else:
                 draft_message = "\n\n".join((*required_message_parts, health_question))
+
+        # 第二稿只改措辞：数字被改了就用回第一稿。健康任务不走这一步——它的固定
+        # 事实句是服务器拼的，不能交给另一个模型重写。
+        if (
+            draft_message is not None
+            and decision_error is None
+            and self._refiner is not None
+            and task_kind != ProactiveCareTaskKind.HEALTH_EVENT
+            and numbers_in(draft_message)
+        ):
+            refinement = await refine_wording(self._refiner, draft=draft_message)
+            draft_message = refinement.text
+            if refinement.rejected:
+                logger.warning(
+                    "第二稿改了数字，已退回第一稿（任务=%s，原因=%s）",
+                    task_id,
+                    "；".join(refinement.rejected),
+                )
 
         check_at = datetime.now(timezone.utc)
         auditor_run_id: UUID | None = None
@@ -1052,6 +1296,11 @@ class ProactiveCareProcessor:
                     role=MessageRole.ASSISTANT,
                     status=MessageStatus.COMPLETED,
                     content=message,
+                    proactive_reason=message_reason(
+                        task,
+                        now=finished_at,
+                        timezone_name=live_settings.timezone,
+                    ),
                     sources=[],
                     completed_at=finished_at,
                     conversation_id=care.id,

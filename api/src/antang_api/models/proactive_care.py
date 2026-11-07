@@ -32,6 +32,13 @@ class ProactiveCareTaskKind(str, Enum):
     HEALTH_EVENT = "health_event"
     ROUTINE_CHECK_IN = "routine_check_in"
     PLAN_FOLLOW_UP = "plan_follow_up"
+    # 由行为痕迹（反复测、回避运动、夜里反复确认）产生的任务：它没有穿戴导入
+    # 也没有计划，来源是「数据长成这个样子」，所以单独一类，免得和心率事件混用
+    # 同一套「必须有穿戴导入」的约束。
+    BEHAVIOR_SIGNAL = "behavior_signal"
+    # 「血糖低到 3.2，他当时没觉得」之后隔几天回访一次：这一档最容易过去就忘，
+    # 而它恰恰是下一次直接晕过去的前兆。同样没有穿戴导入也没有计划。
+    DUAL_RISK_FOLLOW_UP = "dual_risk_follow_up"
 
 
 class ProactiveCareTaskStatus(str, Enum):
@@ -145,6 +152,12 @@ class ProactiveCareSettings(Base):
         nullable=True,
     )
     auto_downgraded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # 行为痕迹的校准期：这段时间内只记录「本来会发」，不真发。阈值是我按公开研究
+    # 定的，没在真人身上校准过——先用一周真实数据看看会触发几次，再决定要不要发。
+    behavior_calibration_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -287,7 +300,11 @@ class ProactiveCareTask(Base):
             "(kind = 'routine_check_in' AND wearable_import_id IS NULL "
             "AND care_plan_id IS NULL AND care_plan_revision IS NULL) OR "
             "(kind = 'plan_follow_up' AND wearable_import_id IS NULL "
-            "AND care_plan_id IS NOT NULL AND care_plan_revision IS NOT NULL)",
+            "AND care_plan_id IS NOT NULL AND care_plan_revision IS NOT NULL) OR "
+            "(kind = 'behavior_signal' AND wearable_import_id IS NULL "
+            "AND care_plan_id IS NULL AND care_plan_revision IS NULL) OR "
+            "(kind = 'dual_risk_follow_up' AND wearable_import_id IS NULL "
+            "AND care_plan_id IS NULL AND care_plan_revision IS NULL)",
             name="ck_proactive_care_tasks_source",
         ),
     )
@@ -356,6 +373,43 @@ class ProactiveCareTask(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BehaviorSignalRecord(Base):
+    """一次「本来会提」的行为痕迹记录。
+
+    留着它是为了校准：阈值、窗口、冷却都是我按公开研究定的，没在真人身上验证过。
+    先记一周、不真发，看它会触发几次——如果一个人一周被触发十几次，那不是他
+    有问题，是我的阈值有问题。`dispatched` 说明这一次有没有真的排成任务。
+    """
+
+    __tablename__ = "behavior_signal_records"
+    __table_args__ = (
+        Index(
+            "ix_behavior_signal_records_user_detected",
+            "user_id",
+            "detected_at",
+        ),
+        CheckConstraint(
+            "suppressed_reason IS NULL OR suppressed_reason IN "
+            "('calibration', 'already_queued', 'cooling_down', 'expired_window')",
+            name="ck_behavior_signal_records_reason",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        server_default=text("uuidv7()"),
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+    )
+    kind: Mapped[str] = mapped_column(String(40))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dispatched: Mapped[bool] = mapped_column(Boolean, default=False)
+    suppressed_reason: Mapped[str | None] = mapped_column(String(32))
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class PushInstallation(Base):

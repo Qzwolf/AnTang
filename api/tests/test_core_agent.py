@@ -201,6 +201,30 @@ def test_core_prompt_keeps_calls_and_repetition_out_of_the_reply() -> None:
     assert "必须至少原样复制一个" in SYSTEM_PROMPT
 
 
+def test_core_prompt_does_not_read_the_patients_words_back_as_proof() -> None:
+    # 曾经出现过「记下了。你说『怕低血糖，怕没人发现』——这句我留着」这种交差式复述，
+    # 像在填表而不像在说话。
+    assert "不要把患者刚说的话括起来再复述一遍" in SYSTEM_PROMPT
+    assert "不要引号、不要重述" in SYSTEM_PROMPT
+
+
+def test_core_prompt_does_not_dump_a_list_of_guesses_at_a_bad_night() -> None:
+    # akaa 凌晨说「我死了你会想我吗」，回复把可能的原因一口气列了三条，
+    # 像审问也像清单；而且「明早我来问你」只是口头答应，没有排成一次真的联系。
+    assert "不要一口气列出三五条可能的原因" in SYSTEM_PROMPT
+    assert "他越难受，你越要少说" in SYSTEM_PROMPT
+    assert "工具返回成功以后才说「明天早上我来问你」" in SYSTEM_PROMPT
+    assert "空口答应" in SYSTEM_PROMPT
+
+
+def test_core_prompt_keeps_the_number_and_the_feeling_apart() -> None:
+    # 血糖低但他没感觉，和血糖不高他却很怕，是两种处境，不能一套话说完。
+    assert "血糖这件事要同时看两面" in SYSTEM_PROMPT
+    assert "当时你有感觉到吗" in SYSTEM_PROMPT
+    assert "血糖低但他没感觉" in SYSTEM_PROMPT
+    assert "血糖不算低但他很怕" in SYSTEM_PROMPT
+
+
 async def test_core_model_rejects_missing_dynamic_prompt() -> None:
     messages: list[AnyMessage] = [HumanMessage(content="你好")]
     request: ModelRequest[AgentContext | None] = ModelRequest(

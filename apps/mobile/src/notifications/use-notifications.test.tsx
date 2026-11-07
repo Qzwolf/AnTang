@@ -76,6 +76,7 @@ const proactiveMessage: ChatMessage = {
   role: 'assistant',
   status: 'completed',
   content: '今天感觉怎么样？',
+  proactiveReason: null,
   sources: [],
   attachments: [],
   createdAt: '2026-07-18T10:00:00Z',

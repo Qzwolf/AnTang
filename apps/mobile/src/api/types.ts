@@ -82,6 +82,8 @@ export type ChatMessage = {
   role: MessageRole;
   status: MessageStatus;
   content: string;
+  /** 主动关怀消息的「为什么是我先开口」；患者自己的对话为 null。 */
+  proactiveReason: string | null;
   sources: ChatSource[];
   attachments: ChatAttachment[];
   createdAt: string;
@@ -94,7 +96,11 @@ export type MessageHistory = {
 };
 
 export type ProactiveCareNotificationData = {
-  kind: "routine_check_in" | "plan_follow_up" | "health_event";
+  kind:
+    | "routine_check_in"
+    | "plan_follow_up"
+    | "health_event"
+    | "behavior_signal";
   messageId: string;
   deliveryId: string;
 };
@@ -862,6 +868,10 @@ function parseMessage(value: unknown): ChatMessage {
     role,
     status: status as MessageStatus,
     content: data.content,
+    proactiveReason:
+      data.proactive_reason === undefined || data.proactive_reason === null
+        ? null
+        : stringValue(data.proactive_reason, "message.proactive_reason"),
     sources: parseSources(data.sources, "message.sources"),
     attachments: Array.isArray(data.attachments)
       ? data.attachments.map((attachment, index) =>
@@ -929,7 +939,11 @@ export function parseProactiveCareNotificationData(
 ): ProactiveCareNotificationData {
   const data = objectValue(value, "notification");
   const kind = stringValue(data.kind, "notification.kind");
-  if (!["routine_check_in", "plan_follow_up", "health_event"].includes(kind)) {
+  if (
+    !["routine_check_in", "plan_follow_up", "health_event", "behavior_signal"].includes(
+      kind,
+    )
+  ) {
     throw new Error("notification.kind 无效");
   }
   return {
@@ -1782,6 +1796,9 @@ export type PsychosocialAssessmentInput = {
   assessedAt: string;
   // 逐题选择：百分比也照传（兼容还没升级的后端），但真正算分的是服务端。
   answers: { id: string; value: number }[];
+  // 世界卫生组织那五道（WHO-5）是选填的附加块，搭在同一次评估里交上去：
+  // 服务端单独给它一张分数，不与恐惧分量表混在一起。没答就整个不传。
+  who5Answers?: { id: string; value: number }[];
 };
 
 export type InstrumentOption = { value: number; label: string };
@@ -2658,4 +2675,94 @@ export function parseGlucoseReports(value: unknown): GlucoseReport[] {
   const items = data.items;
   if (!Array.isArray(items)) return [];
   return items.map(parseGlucoseReport);
+}
+
+export type CaseGraphNode = {
+  id: string;
+  layer: 'cognitive' | 'affective';
+  kindLabel: string;
+  text: string;
+  intensity: number | null;
+};
+
+export type CaseGraphEdge = {
+  fromNodeId: string;
+  toNodeId: string;
+  relationLabel: string;
+  note: string | null;
+};
+
+export type CaseGraph = {
+  nodes: CaseGraphNode[];
+  edges: CaseGraphEdge[];
+};
+
+/**
+ * 服务端会给中文标签；读不到的字段退回空串，让界面少一行而不是整页报错。
+ */
+export function parseCaseGraph(value: unknown): CaseGraph {
+  const data = objectValue(value, 'case graph');
+  const rawNodes = Array.isArray(data.nodes) ? data.nodes : [];
+  const rawEdges = Array.isArray(data.edges) ? data.edges : [];
+  return {
+    nodes: rawNodes.map((item) => {
+      const node = objectValue(item, 'case graph node');
+      return {
+        id: String(node.id ?? ''),
+        layer: node.layer === 'affective' ? 'affective' : 'cognitive',
+        kindLabel: String(node.kind_label ?? ''),
+        text: String(node.text ?? ''),
+        intensity: typeof node.intensity === 'number' ? node.intensity : null,
+      };
+    }),
+    edges: rawEdges.map((item) => {
+      const edge = objectValue(item, 'case graph edge');
+      return {
+        fromNodeId: String(edge.from_node_id ?? ''),
+        toNodeId: String(edge.to_node_id ?? ''),
+        relationLabel: String(edge.relation_label ?? ''),
+        note: typeof edge.note === 'string' ? edge.note : null,
+      };
+    }),
+  };
+}
+
+/** 一次「当时血糖多少」与「当时有没有感觉」的对照。 */
+export type DualRiskLabel = 'both' | 'silent' | 'felt_only' | 'neither';
+
+export type DualRiskEntry = {
+  id: string;
+  measuredAt: string;
+  valueMgDl: number | null;
+  label: DualRiskLabel;
+  labelText: string;
+};
+
+const DUAL_RISK_LABELS: readonly string[] = [
+  'both',
+  'silent',
+  'felt_only',
+  'neither',
+];
+
+/**
+ * 服务端已经把标签算好了（`label`）并给了一句第二人称的话（`label_text`）。
+ * 认不出的标签退回 `neither`：宁可显示得平淡，也不要照着未知值编一个结论。
+ */
+export function parseDualRiskEntries(value: unknown): DualRiskEntry[] {
+  const data = objectValue(value, 'dual risk');
+  const items = Array.isArray(data.entries) ? data.entries : [];
+  return items.map((item) => {
+    const entry = objectValue(item, 'dual risk entry');
+    const rawLabel = String(entry.label ?? '');
+    return {
+      id: String(entry.id ?? ''),
+      measuredAt: String(entry.measured_at ?? ''),
+      valueMgDl: typeof entry.value_mg_dl === 'number' ? entry.value_mg_dl : null,
+      label: (DUAL_RISK_LABELS.includes(rawLabel)
+        ? rawLabel
+        : 'neither') as DualRiskLabel,
+      labelText: String(entry.label_text ?? ''),
+    };
+  });
 }
