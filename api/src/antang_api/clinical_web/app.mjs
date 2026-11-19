@@ -1,4 +1,4 @@
-import { glucoseValue, lineChart, stepsChart, eventChart } from './chart.mjs?v=20261029-point5';
+import { glucoseValue, lineChart, stepsChart, eventChart } from './chart.mjs?v=20261119-pump-rate-style';
 
 const $ = id => document.getElementById(id);
 const state = { access: null, refresh: null, user: null, unlock: null, expiry: null, configured: false, scope: 'granted', patients: [], next: null, selected: null, overview: null, epoch: 0, request: null };
@@ -37,9 +37,20 @@ async function api(path, { body, method = 'GET', signal } = {}) {
   return data;
 }
 
-function clearDetail() {
-  state.overview = null; show('demo-notice', false); show('public-notice', false); show('study-card', false); show('study-notice', false);
+function clearDetail(keepNavigation = false) {
+  glucoseContextRequest?.abort();
+  $('glucose-context-events').replaceChildren();
+  if ($('glucose-record-dialog').open) $('glucose-record-dialog').close();
+  state.overview = null;
+  state.olderGlucose = [];
+  state.moreGlucose = false;
+  text('glucose-records-status', '');
+  show('demo-notice', false); show('public-notice', false); show('study-card', false); show('study-notice', false);
   show('clinical-content', false);
+  if (!keepNavigation) {
+    show('feature-links', false);
+    show('feature-empty');
+  }
   $('glucose-chart').replaceChildren(); $('wearable-sources').replaceChildren();
   $('glucose-records').replaceChildren(); $('profile-fields').replaceChildren(); $('health-facts').replaceChildren();
 }
@@ -49,7 +60,7 @@ function setScope(scope) {
   state.scope = scope;
   $('scope-granted').setAttribute('aria-pressed', String(scope === 'granted'));
   $('scope-all').setAttribute('aria-pressed', String(scope === 'all'));
-  text('scope-description', scope === 'all' ? '统一密码解锁 · 全体患者只读' : '查看向你授权的患者');
+  text('scope-description', scope === 'all' ? '统一密码解锁 · 全体患者只读' : '查看已授权临床患者和研究样本');
   text('access-badge', scope === 'all' ? '统一密码 · 全体患者只读' : '个人授权 · 只读');
   show('patient-detail', false); show('no-patient');
   show('scope-expiry', scope === 'all');
@@ -57,11 +68,11 @@ function setScope(scope) {
 }
 
 async function loadPatients(append = false) {
-  const epoch = state.epoch, scope = state.scope, search = $('patient-search').value.trim();
+  const epoch = state.epoch, scope = state.scope, search = $('patient-search').value.trim(), dataset = '';
   if (!append) { state.patients = []; state.next = null; $('patient-list').replaceChildren(element('p', 'list-message', '正在读取患者…')); }
   show('more-patients', false);
   try {
-    const params = new URLSearchParams({ scope, search, limit: '50' });
+    const params = new URLSearchParams({ scope, search, dataset, limit: '50' });
     if (append && state.next) params.set('after', state.next);
     const data = await api('/api/v1/clinical/patients?' + params);
     if (epoch !== state.epoch || scope !== state.scope || search !== $('patient-search').value.trim()) return;
@@ -69,6 +80,8 @@ async function loadPatients(append = false) {
     state.next = data.next_after;
     text('patient-count', data.total);
     renderPatients(); show('more-patients', !!state.next);
+    show('example-patients', scope === 'granted');
+    if (scope === 'granted') await loadExamples();
   } catch (error) {
     if (error.name === 'AbortError' || !state.access) return;
     $('patient-list').replaceChildren(element('p', 'list-message', error.message));
@@ -76,11 +89,19 @@ async function loadPatients(append = false) {
   }
 }
 
+function patientDisplayName(patient) {
+  const ohio = /^ohio_(2018|2020)_(\d+)$/.exec(patient.username);
+  if (ohio) return `研究数据：Ohio ${ohio[1]} · ${ohio[2]}`;
+  const uci = /^uci_diabetes_(\d{2})$/.exec(patient.username);
+  if (uci) return `研究数据：UCI Diabetes · ${uci[1]}`;
+  return (patient.full_name || '未填写姓名').replaceAll(' · ', '：');
+}
+
 function renderPatients() {
   const rows = state.patients.map(patient => {
     const button = element('button', 'patient-row' + (patient.id === state.selected ? ' selected' : ''));
     button.type = 'button';
-    const name = (patient.full_name || '未填写姓名').replaceAll(' · ', '：');
+    const name = patientDisplayName(patient);
     const copy = element('span', 'row-copy');
     copy.append(element('strong', '', name), element('span', 'mono', patient.id));
     button.append(element('span', 'avatar', name.slice(0, 1)), copy);
@@ -88,7 +109,7 @@ function renderPatients() {
     button.addEventListener('click', () => selectPatient(patient));
     return button;
   });
-  $('patient-list').replaceChildren(...(rows.length ? rows : [element('p', 'list-message', $('patient-search').value ? '没有匹配的患者' : state.scope === 'all' ? '暂无患者账号' : '暂无已授权患者。患者在手机端授权后会出现在这里。')]));
+  $('patient-list').replaceChildren(...(rows.length ? rows : [element('p', 'list-message', $('patient-search').value ? '没有匹配的患者' : state.scope === 'all' ? '暂无患者账号' : '暂无已授权临床患者。')]));
 }
 
 function localDate(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
@@ -104,29 +125,41 @@ function range() {
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
-async function selectPatient(patient) {
+async function selectPatient(patient, scope = state.scope) {
+  if (state.selectedScope === 'examples' && scope !== 'examples') quickRange(14);
+  state.selectedScope = scope;
+  $('study-filter').value = '';
+  state.feature = 'glucose-visualization';
   state.selected = patient.id; clearDetail(); renderPatients();
-  text('patient-name', (patient.full_name || '未填写姓名').replaceAll(' · ', '：')); text('patient-id', '账号 ID · ' + patient.id);
+  text('access-badge', scope === 'examples' ? '研究样本 · 直接查看' : scope === 'all' ? '统一密码 · 只读' : '个人授权 · 只读');
+  text('patient-name', patientDisplayName(patient)); text('patient-id', '账号 ID · ' + patient.id);
   show('no-patient', false); show('patient-detail');
   await loadOverview(true);
+  if (state.selected === patient.id) scrollToPatient();
 }
 
 async function loadOverview(initial = false) {
   if (!state.selected) return;
   state.request?.abort(); const controller = new AbortController(); state.request = controller;
-  const id = state.selected, scope = state.scope;
-  clearDetail(); text('detail-status', '正在读取患者记录…');
+  const id = state.selected, scope = state.selectedScope;
+  clearDetail(true); text('detail-status', '正在读取患者记录…');
   try {
     const params = new URLSearchParams({ ...range(), scope });
     const data = await api(`/api/v1/clinical/patients/${encodeURIComponent(id)}/overview?${params}`, { signal: controller.signal });
-    if (controller.signal.aborted || id !== state.selected || scope !== state.scope) return;
+    if (controller.signal.aborted || id !== state.selected || scope !== state.selectedScope) return;
     if (initial === true && data.study) {
       const latest = new Date(new Date(data.study.period_end).getTime() - (data.study.dataset === 'OhioT1DM' ? 300000 : 1));
       document.querySelectorAll('[data-days]').forEach(button => button.classList.remove('selected'));
       $('range-start').value = localDate(latest); $('range-end').value = localDate(latest);
       return await loadOverview();
     }
-    state.overview = data; renderOverview(); text('detail-status', ''); show('clinical-content');
+    state.overview = data;
+    state.moreGlucose = data.glucose.truncated;
+    renderOverview();
+    text('detail-status', '');
+    show('clinical-content');
+    show('feature-links');
+    show('feature-empty', false);
   } catch (error) {
     if (error.name === 'AbortError' || !state.access) return;
     clearDetail(); text('detail-status', error.message);
@@ -154,24 +187,171 @@ function renderOverview() {
   text('glucose-count', summary.count.toLocaleString()); text('glucose-average', value(summary.average_mg_dl));
   text('glucose-range', `${value(summary.minimum_mg_dl)} / ${value(summary.maximum_mg_dl)}`);
   text('glucose-latest', value(points.at(-1)?.value_mg_dl)); text('glucose-latest-time', points.length ? dateTime(points.at(-1).measured_at) : '所选时间范围内尚无记录');
-  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, label: `${demo ? "模拟演示 · " : ""}${sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, gapHours: data.study?.dataset === 'OhioT1DM' ? 0.25 : 6, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
+  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, reading: point, label: `${demo ? "模拟演示 · " : ""}${sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, onActivate: point => showGlucoseRecord(point.reading), gapHours: data.study?.dataset === 'OhioT1DM' ? 0.25 : 6, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
   text('glucose-note', data.glucose.truncated ? `该范围共 ${summary.count} 条记录，曲线展示最新 ${points.length} 条；请缩短范围查看更早细节。上方统计按全部记录计算。` : `共 ${summary.count} 条有效血糖记录，已撤回记录不参与曲线与统计。时间按当前浏览器时区显示。`);
   text('sampling-note', data.study?.dataset === 'OhioT1DM' ? 'CGM 原始采样约每 5 分钟一次；超过 15 分钟的缺口断开，不插值。数据集日期已脱敏平移，可能晚于当前日期，不代表实时测量。' : '仅连接同来源、间隔不超过 6 小时的相邻记录；离散测量不能代表连续血糖。');
   renderStudy(data);
-  text('value-heading', '血糖 · ' + label);
-  const rows = points.slice(-100).reverse().map(point => {
-    const row = element('tr');
-    for (const cell of [dateTime(point.measured_at), value(point.value_mg_dl), contextNames[point.context] || point.context, sourceNames[point.source] || point.source, point.note || '—']) row.append(element('td', '', cell));
-    return row;
-  });
-  if (!rows.length) { const cell = element('td', '', '此时间范围内暂无有效血糖记录'); cell.colSpan = 5; const row = element('tr'); row.append(cell); rows.push(row); }
-  $('glucose-records').replaceChildren(...rows); text('records-caption', `显示最新 ${Math.min(points.length, 100)} 条 / 共 ${summary.count} 条`);
+  show('study-link', !!data.study && data.study.dataset !== 'UCI Diabetes');
+  text('study-link', data.study?.dataset === 'CGM PDF' ? 'CGM 原报告摘要' : '胰岛素与饮食');
+  show('wearable-link', data.wearable.sources.length > 0);
+  renderGlucoseRecords();
   show('wearable-heading', data.wearable.sources.length > 0); show('wearable-sources', data.wearable.sources.length > 0);
   renderWearable(data); renderProfile(data.profile);
   const dataRows = [['已保存血糖记录', summary.count ? `该时段 ${summary.count} 条` : '该时段暂无记录'], ['血糖设备自动同步', '尚未接入'], ['手环已同步数据', data.wearable.sources.length ? `${data.wearable.sources.length} 个独立来源` : '该时段暂无记录']];
   text('data-source-note', data.study?.dataset === 'OhioT1DM' ? '已导入 OhioT1DM CGM、胰岛素及饮食研究记录；未接入患者血糖设备实时同步。' : data.study?.dataset === 'CGM PDF' ? '本样本只有原报告摘要，没有逐点血糖数据；摘要不是本系统根据采样重新计算的结果。' : '当前显示已保存记录，血糖设备自动同步尚未接入。');
+  renderFeature();
   $('data-status').replaceChildren(...dataRows.map(([name, status]) => { const row = element('div', 'data-row'); row.append(element('span', '', name), element('span', '', status)); return row; }));
 }
+
+const glucoseRecordTime = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: 'numeric', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: false,
+});
+
+function glucoseRecordCells(point) {
+  const unit = $('glucose-unit').value;
+  return [
+    glucoseRecordTime.format(new Date(point.measured_at)),
+    glucoseValue(point.value_mg_dl, unit).toFixed(unit === 'mg' ? 0 : 2),
+    contextNames[point.context] || point.context,
+    sourceNames[point.source] || point.source,
+    point.note || '—',
+  ];
+}
+
+function showGlucoseRecord(point) {
+  const dialog = $('glucose-record-dialog');
+  const unit = $('glucose-unit').value === 'mg' ? 'mg/dL' : 'mmol/L';
+  const labels = ['测量时间', '血糖 · ' + unit, '场景', '来源', '备注'];
+  $('glucose-record-fields').replaceChildren(...glucoseRecordCells(point).map((value, index) => {
+    const field = element('div');
+    field.append(element('dt', '', labels[index]), element('dd', '', value));
+    return field;
+  }));
+  if (!dialog.open) dialog.showModal();
+  $('glucose-dialog-body').scrollTop = 0;
+  void loadGlucoseContext(point);
+}
+
+// Scroll the record even if the pointer is over the modal header or its backdrop.
+document.addEventListener('wheel', event => {
+  if (!$('glucose-record-dialog').open || event.ctrlKey || !event.deltaY) return;
+  const body = $('glucose-dialog-body');
+  if (body.contains(event.target)) return;
+  event.preventDefault();
+  const mode = event.deltaMode;
+  const scale = mode === WheelEvent.DOM_DELTA_PAGE ? body.clientHeight
+    : mode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+  body.scrollTop += event.deltaY * scale;
+}, {capture: true, passive: false});
+
+let glucoseContextRequest;
+$('glucose-record-dialog').addEventListener('close', () => {
+  if (!$('glucose-record-dialog').open) glucoseContextRequest?.abort();
+});
+
+async function loadGlucoseContext(point) {
+  glucoseContextRequest?.abort();
+  const list = $('glucose-context-events');
+  list.replaceChildren();
+  if (state.overview?.study?.dataset !== 'OhioT1DM') {
+    text('glucose-context-status', '此患者暂无可关联的胰岛素与饮食数据。');
+    return;
+  }
+
+  const controller = new AbortController();
+  glucoseContextRequest = controller;
+  text('glucose-context-status', '正在查找附近记录…');
+  const patient = encodeURIComponent(state.selected);
+  const scope = encodeURIComponent(state.selectedScope);
+  try {
+    const events = await api(`/api/v1/clinical/patients/${patient}/glucose-records/${point.id}/context?scope=${scope}`,
+      {signal: controller.signal});
+    if (controller.signal.aborted || !$('glucose-record-dialog').open) return;
+    if (!events.length) {
+      text('glucose-context-status', '这个时段没有可关联的胰岛素或饮食记录。');
+      return;
+    }
+
+    const sampleTime = Date.parse(point.measured_at);
+    const activeAtSample = event => Date.parse(event.measured_at) <= sampleTime && Date.parse(event.ended_at) > sampleTime;
+    const hasTemporaryRate = events.some(event => event.kind === 'temp_basal' && activeAtSample(event));
+    for (const event of events) {
+      const label = studyKinds[event.kind];
+      let suffix = '';
+      if (activeAtSample(event)) {
+        suffix = event.kind === 'basal' && hasTemporaryRate ? '（当时由临时基础速率覆盖）' : '（采样时处于该记录时段）';
+      }
+      const times = glucoseRecordTime.format(new Date(event.measured_at)) +
+        (event.ended_at ? ' 至 ' + glucoseRecordTime.format(new Date(event.ended_at)) : '');
+      const item = element('li');
+      item.append(element('strong', '', `${label} · ${event.value} ${event.unit}${suffix}`), element('span', '', times));
+      list.append(item);
+    }
+    text('glucose-context-status', '按时间对照记录，不能单凭时间接近判断血糖变化的原因。');
+  } catch (error) {
+    if (controller.signal.aborted || !$('glucose-record-dialog').open) return;
+    if (error.status === 403 || error.status === 404) {
+      $('glucose-record-dialog').close();
+      await loadOverview();
+    } else text('glucose-context-status', '关联记录加载失败，请关闭后重新点选。');
+  }
+}
+
+function renderGlucoseRecords() {
+  const {glucose} = state.overview;
+  const points = [...glucose.points].reverse().concat(state.olderGlucose);
+  const rows = document.createDocumentFragment();
+  for (const point of points) {
+    const row = element('tr');
+    for (const value of glucoseRecordCells(point)) row.append(element('td', '', value));
+    rows.append(row);
+  }
+  if (!points.length) {
+    const row = element('tr');
+    const cell = element('td', '', '此时间范围内暂无有效血糖记录');
+    cell.colSpan = 5;
+    row.append(cell);
+    rows.append(row);
+  }
+  text('value-heading', '血糖 · ' + ($('glucose-unit').value === 'mg' ? 'mg/dL' : 'mmol/L'));
+  $('glucose-records').replaceChildren(rows);
+  text('records-caption', state.moreGlucose ? `已显示 ${points.length} 条 / 共 ${glucose.summary.count} 条` : `共 ${points.length} 条`);
+  show('more-glucose-records', state.moreGlucose);
+}
+
+$('more-glucose-records').addEventListener('click', async event => {
+  const overview = state.overview;
+  if (!overview || !state.moreGlucose) return;
+  const last = state.olderGlucose.at(-1) || overview.glucose.points[0];
+  const button = event.currentTarget;
+  button.disabled = true;
+  text('glucose-records-status', '正在加载更早记录…');
+  try {
+    const params = new URLSearchParams({
+      scope: state.selectedScope,
+      start: overview.period_start,
+      end: overview.period_end,
+      before_time: last.measured_at,
+      before_id: last.id,
+    });
+    const data = await api(`/api/v1/clinical/patients/${encodeURIComponent(state.selected)}/glucose-records?${params}`,
+      {signal: state.request?.signal});
+    if (state.overview !== overview) return;
+    state.olderGlucose.push(...data.points);
+    state.moreGlucose = data.has_more;
+    renderGlucoseRecords();
+    text('glucose-records-status', '');
+  } catch (error) {
+    if (error.name === 'AbortError' || state.overview !== overview) return;
+    if (error.status === 403) {
+      if (state.selectedScope === 'all') await expireScope(error.message);
+      else { clearDetail(); text('detail-status', '该患者当前不可访问。'); }
+    } else text('glucose-records-status', error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 function renderProfile(profile) {
   const personal = profile.personal_profile;
@@ -215,7 +395,8 @@ $('login-form').addEventListener('submit', async event => {
     $('password').value = ''; show('login-view', false); show('workspace'); notify('');
     text('account-name', data.user.full_name || data.user.username); text('role-label', data.user.role === 'researcher' ? '研发管理' : '医护');
     const status = await api('/api/v1/clinical/access'); state.configured = status.configured;
-    const admin = data.user.role === 'researcher'; show('admin-view', admin); show('clinical-view', !admin);
+    document.querySelectorAll('.patient-panel details').forEach(group => { group.open = false; });
+    const admin = data.user.role === 'researcher'; show('feature-nav', data.user.role === 'clinician'); show('admin-view', admin); show('clinical-view', !admin);
     if (admin) text('password-config-state', status.configured ? '统一密码已设置，可在此修改' : '尚未设置统一密码');
     else { setScope('granted'); quickRange(14); await loadPatients(); }
   } catch (error) { if (!state.access) text('login-error', error.message); else notify(error.message); }
@@ -272,11 +453,45 @@ setInterval(async () => {
 }, 20000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.access && state.selected) void loadOverview(); });
 
-const studyKinds = {bolus:'胰岛素追加剂量',basal:'基础输注率',temp_basal:'临时基础率',meal:'饮食碳水',finger_stick:'指尖血糖'};
+const studyKinds = {
+  bolus: '追加胰岛素',
+  basal: '基础输注',
+  temp_basal: '临时基础输注',
+  meal: '饮食碳水',
+  finger_stick: '指尖血糖',
+};
+
+function renderStudyRecords(study) {
+  const kind = $('study-filter').value;
+  const events = kind ? study.events.filter(event => event.kind === kind) : study.events;
+  const count = `显示 ${events.length} 条`;
+  const limit = study.events_truncated ? `。所选时段共 ${study.event_count} 条，当前筛选基于最新 ${study.events.length} 条，可缩短时间范围查看更早记录。` : '';
+  text('study-count', count + limit);
+  const rows = [...events].reverse().map(event => {
+    const row = element('tr');
+    for (const value of [
+      dateTime(event.measured_at), dateTime(event.ended_at),
+      studyKinds[event.kind] || event.kind, `${event.value} ${event.unit}`,
+    ]) row.append(element('td', '', value));
+    return row;
+  });
+  if (!rows.length) {
+    const row = element('tr');
+    const cell = element('td', '', '当前时段暂无此类记录');
+    cell.colSpan = 4;
+    row.append(cell);
+    rows.push(row);
+  }
+  $('study-events').replaceChildren(...rows);
+}
+
+$('study-filter').addEventListener('change', () => {
+  if (state.overview?.study) renderStudyRecords(state.overview.study);
+});
+
 function renderStudy(data) {
-  const study = data.study; show('study-card', !!study); if (!study) return;
+  const study = data.study; show('study-card', !!study && study.dataset !== 'UCI Diabetes'); if (!study || study.dataset === 'UCI Diabetes') return;
   text('study-title', study.dataset === 'CGM PDF' ? 'CGM 原报告摘要' : '胰岛素与饮食记录');
-  text('study-drug', study.insulin_type ? `胰岛素类型（原始记录）：${study.insulin_type}` : '本数据未提供胰岛素或其他药物信息');
   const report = study.provenance.report;
   show('report-metrics', !!report); show('study-events-area', !report);
   if (report) {
@@ -284,14 +499,73 @@ function renderStudy(data) {
     $('report-metrics').replaceChildren(...Object.entries(report.metrics).map(([key,value]) => element('p','',`${labels[key]}：${value}`)),element('p','caption',`来源：${report.file}，${report.pages} 页。报告范围 ${report.start} 至 ${report.end}。未从 AGP 图或每日曲线反推采样；原报告参考区间可能因人群而异。`));
     return;
   }
-  text('study-count', `所选范围共 ${study.event_count} 条事件；${study.events_truncated ? '图和明细仅显示最新1000条，请缩短范围。' : '均已显示。'} 基础率单位 U/h，追加剂量单位 U，不能直接相加；临时基础率在有效期内覆盖常规基础率，0 表示暂停。`);
+  renderStudyRecords(study);
   eventChart($('study-chart'), study.events, data.period_start, data.period_end);
-  const rows = study.events.slice(-100).reverse().map(event => {
-    const row=element('tr');
-    for (const value of [dateTime(event.measured_at),event.ended_at ? dateTime(event.ended_at) : '—',studyKinds[event.kind],`${event.value} ${event.unit}`,event.detail || '—',event.source_ref]) row.append(element('td','',value));
-    return row;
-  });
-  if (!rows.length) {const row=element('tr');const cell=element('td','','该范围没有胰岛素、饮食或指尖血糖记录');cell.colSpan=6;row.append(cell);rows.push(row);}
-  $('study-events').replaceChildren(...rows);
-  text('study-detail-note',`明细显示本次返回记录的末尾 ${Math.min(100,study.events.length)} 条；扩展输注保留起止时间，未计算跨时段总剂量。`);
 }
+
+async function loadExamples() {
+  const epoch = state.epoch;
+  for (const dataset of ['uci', 'ohio']) {
+    const container = $('examples-' + dataset);
+    container.replaceChildren(element('p', 'list-message', '正在读取…'));
+    try {
+      const patients = [];
+      let after = null;
+      do {
+        const params = new URLSearchParams({scope: 'examples', dataset, limit: '100'});
+        if (after) params.set('after', after);
+        const page = await api('/api/v1/clinical/patients?' + params);
+        if (epoch !== state.epoch) return;
+        patients.push(...page.patients);
+        after = page.next_after;
+      } while (after);
+      container.replaceChildren(...patients.map(patient => {
+        const button = element('button', 'patient-row', patientDisplayName(patient));
+        button.type = 'button';
+        button.addEventListener('click', () => {
+          document.querySelectorAll('.example-tree .patient-row').forEach(row => row.classList.remove('selected'));
+          button.classList.add('selected');
+          void selectPatient(patient, 'examples');
+        });
+        return button;
+      }));
+      if (!patients.length) container.append(element('p', 'list-message', '暂无已导入记录'));
+    } catch (error) {
+      if (epoch === state.epoch) container.replaceChildren(element('p', 'list-message', error.message));
+    }
+  }
+}
+
+const featureButtons = [...$('feature-links').querySelectorAll('[data-feature]')];
+const extraPanels = {
+  'glucose-visualization': [document.querySelector('.metric-grid'), $('glucose-records-section')],
+  'wearable-heading': [$('wearable-sources')],
+};
+
+function renderFeature() {
+  const selected = featureButtons.find(button => !button.hidden && button.dataset.feature === state.feature);
+  state.feature = (selected || featureButtons[0]).dataset.feature;
+  for (const button of featureButtons) {
+    const id = button.dataset.feature;
+    const active = id === state.feature;
+    button.setAttribute('aria-pressed', String(active));
+    show(id, active);
+    for (const panel of extraPanels[id] || []) panel.hidden = !active;
+  }
+  if (state.feature === 'profile-section') $('profile-section').open = true;
+}
+
+function scrollToPatient() {
+  const heading = $('patient-heading-anchor').getBoundingClientRect();
+  const header = $('workspace-header').getBoundingClientRect();
+  const navHeight = $('feature-nav').getBoundingClientRect().height;
+  window.scrollBy({top: heading.top - header.bottom - navHeight - 12});
+}
+
+$('feature-links').addEventListener('click', event => {
+  const button = event.target.closest('[data-feature]');
+  if (!button) return;
+  state.feature = button.dataset.feature;
+  if (state.overview) renderFeature();
+  scrollToPatient();
+});

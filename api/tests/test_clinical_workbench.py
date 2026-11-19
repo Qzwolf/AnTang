@@ -54,11 +54,20 @@ async def test_granted_timeline_uses_real_window_and_revocation(client, db_sessi
     data = response.json()
     assert [p["value_mg_dl"] for p in data["glucose"]["points"]] == [90, 150]
     assert data["glucose"]["summary"] == {"count": 2, "average_mg_dl": 120.0, "minimum_mg_dl": 90, "maximum_mg_dl": 150}
+    newest = data["glucose"]["points"][-1]
+    records_path = root.removesuffix("/overview") + "/glucose-records"
+    cursor = {"start": data["period_start"], "end": data["period_end"],
+              "before_time": newest["measured_at"], "before_id": newest["id"]}
+    page = await client.get(records_path, headers=doctor_headers, params=cursor)
+    assert page.status_code == 200
+    assert [p["value_mg_dl"] for p in page.json()["points"]] == [90]
+    assert page.json()["has_more"] is False
     assert data["wearable"]["period_start"] == data["period_start"]
     assert data["wearable"]["period_end"] == data["period_end"]
     assert data["wearable"]["sources"] == []
     assert (await client.get("/api/v1/clinical/patients/" + other["user"]["id"] + "/overview", headers=doctor_headers)).status_code == 403
     await client.delete("/api/v1/patient-access-grants/" + grant.json()["id"], headers=patient_headers)
+    assert (await client.get(records_path, headers=doctor_headers, params=cursor)).status_code == 403
     assert (await client.get(root, headers=doctor_headers)).status_code == 403
     assert (await client.get("/api/v1/clinical/patients", headers=doctor_headers)).json()["total"] == 0
 
@@ -131,3 +140,85 @@ async def test_web_entry_and_invalid_time_windows(client, db_session):
     path = "/api/v1/clinical/patients/" + patient["user"]["id"] + "/overview"
     for params in ({"start": "2026-01-01T00:00:00", "end": "2026-01-02T00:00:00"}, {"start": "2026-01-01T00:00:00Z", "end": "2026-05-01T00:00:00Z"}):
         assert (await client.get(path, headers=headers, params=params)).status_code == 422
+
+async def test_dataset_filter_preserves_grants_and_counts(client, db_session):
+    from antang_api.models import User
+    from uuid import UUID
+
+    patient, patient_headers = await account(client, db_session)
+    doctor, doctor_headers = await account(client, db_session, UserRole.CLINICIAN)
+    user = await db_session.get(User, UUID(patient['user']['id']))
+    user.username = 'uci_diabetes_' + uuid4().hex[:12]
+    user.username_normalized = user.username
+    await db_session.commit()
+    url = '/api/v1/clinical/patients'
+    assert (await client.get(url, headers=doctor_headers, params={'dataset': 'uci'})).json()['total'] == 0
+    await client.post('/api/v1/patient-access-grants', headers=patient_headers, json={'clinician_id': doctor['user']['id']})
+    data = (await client.get(url, headers=doctor_headers, params={'dataset': 'uci', 'limit': 1})).json()
+    assert data['total'] == 1
+    assert data['patients'][0]['id'] == patient['user']['id']
+    assert data['next_after'] is None
+    assert (await client.get(url, headers=doctor_headers, params={'dataset': 'ohio'})).json()['total'] == 0
+    assert (await client.get(url, headers=doctor_headers, params={'dataset': 'invalid'})).status_code == 422
+
+
+async def test_example_datasets_need_no_grant_but_cannot_expose_other_patients(client, db_session):
+    from uuid import UUID
+    from antang_api.models.study import StudySubject
+
+    sample, _ = await account(client, db_session)
+    private, _ = await account(client, db_session)
+    _, headers = await account(client, db_session, UserRole.CLINICIAN)
+    now = datetime.now(UTC)
+    db_session.add(StudySubject(user_id=UUID(sample['user']['id']), dataset='UCI Diabetes',
+        insulin_type=None, period_start=now-timedelta(days=1), period_end=now,
+        provenance={'notice': '公开历史数据'}))
+    await db_session.commit()
+    url = '/api/v1/clinical/patients'
+    response = await client.get(url, headers=headers, params={'scope': 'examples'})
+    assert response.status_code == 200
+    assert [row['id'] for row in response.json()['patients']] == [sample['user']['id']]
+    assert (await client.get(url+'/'+sample['user']['id']+'/overview', headers=headers,
+        params={'scope': 'examples'})).status_code == 200
+    assert (await client.get(url+'/'+private['user']['id']+'/overview', headers=headers,
+        params={'scope': 'examples'})).status_code == 403
+
+
+async def test_glucose_context_matches_same_patient_and_sample_time(client, db_session):
+    from uuid import UUID
+    from antang_api.models import GlucoseReading
+    from antang_api.models.study import StudyEvent, StudySubject
+
+    patient, _ = await account(client, db_session)
+    other, _ = await account(client, db_session)
+    _, doctor = await account(client, db_session, UserRole.CLINICIAN)
+    patient_id, other_id = UUID(patient["user"]["id"]), UUID(other["user"]["id"])
+    now = datetime.now(UTC)
+    db_session.add(StudySubject(user_id=patient_id, dataset="OhioT1DM", insulin_type=None,
+        period_start=now-timedelta(days=1), period_end=now+timedelta(days=1), provenance={}))
+    point = GlucoseReading(user_id=patient_id, value_mg_dl=120, measured_at=now)
+    other_point = GlucoseReading(user_id=other_id, value_mg_dl=140, measured_at=now)
+    db_session.add_all([point, other_point])
+    for kind, owner, hours, stop, unit in (
+        ("basal", patient_id, -6, 4, "U/h"),
+        ("meal", patient_id, -1, None, "g"),
+        ("bolus", patient_id, 1, None, "U"),
+        ("meal", patient_id, 3, None, "g"),
+        ("meal", other_id, 0, None, "g"),
+    ):
+        db_session.add(StudyEvent(id=uuid4(), user_id=owner, kind=kind, value=1, unit=unit,
+            measured_at=now+timedelta(hours=hours), ended_at=now+timedelta(hours=stop) if stop else None,
+            detail="", source_ref="test", raw_record={}))
+    await db_session.commit()
+
+    root = f"/api/v1/clinical/patients/{patient_id}/glucose-records"
+    path = f"{root}/{point.id}/context"
+    assert (await client.get(path, headers=doctor)).status_code == 403
+    response = await client.get(path, headers=doctor, params={"scope": "examples"})
+    assert response.status_code == 200
+    assert [event["kind"] for event in response.json()] == ["basal", "meal", "bolus"]
+    assert (await client.get(f"{root}/{other_point.id}/context", headers=doctor,
+        params={"scope": "examples"})).status_code == 404
+    point.revoked_at = now
+    await db_session.commit()
+    assert (await client.get(path, headers=doctor, params={"scope": "examples"})).status_code == 404

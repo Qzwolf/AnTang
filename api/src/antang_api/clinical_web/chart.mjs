@@ -36,10 +36,17 @@ function empty(container, text) {
   container.replaceChildren(node);
 }
 
-export function lineChart(container, records, { start, end, unit = '', reference = null, compact = false, gapHours = 6, simulated = false, fullStart = start, fullEnd = end }) {
-  const visibleRecords = records.filter(record => new Date(record.time).getTime() >= new Date(start).getTime() && new Date(record.time).getTime() <= new Date(end).getTime());
-  const { points, segments, begin, finish } = chartLayout(visibleRecords, start, end, gapHours);
+export function lineChart(container, records, { start, end, unit = '', reference = null, compact = false, gapHours = 6, simulated = false, fullStart = start, fullEnd = end, onActivate }) {
+  const requestedStart = new Date(start).getTime();
+  const requestedEnd = new Date(end).getTime();
+  const visibleRecords = records.filter(record => {
+    const time = new Date(record.time).getTime();
+    return time >= requestedStart && time <= requestedEnd;
+  });
+  const { points, segments } = chartLayout(visibleRecords, start, end, gapHours);
   if (!points.length) { empty(container, '此时间范围内暂无记录'); return; }
+  const begin = requestedStart;
+  const finish = requestedEnd;
   const width = 1000, height = compact ? 190 : 300;
   const left = 46, right = 18, top = 18, bottom = height - 36;
   const values = [...points.map(point => point.value), ...(reference ?? [])];
@@ -68,9 +75,9 @@ export function lineChart(container, records, { start, end, unit = '', reference
   detail.textContent = '点击采样点查看测量时间与具体数值，可放大附近时段。';
   const controls = document.createElement('div'); controls.className = 'chart-point-controls';
   const zoom = document.createElement('button'); zoom.type = 'button'; zoom.className = 'secondary'; zoom.textContent = '放大附近2小时'; zoom.disabled = true;
-  const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复完整范围'; reset.disabled = start === fullStart && end === fullEnd;
+  const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复完整范围'; reset.disabled = begin === new Date(fullStart).getTime() && finish === new Date(fullEnd).getTime();
   let selected = null, selectedCircle = null;
-  const redraw = (nextStart, nextEnd) => lineChart(container, records, { start: nextStart, end: nextEnd, unit, reference, compact, gapHours, simulated, fullStart, fullEnd });
+  const redraw = (nextStart, nextEnd) => lineChart(container, records, { start: nextStart, end: nextEnd, unit, reference, compact, gapHours, simulated, fullStart, fullEnd, onActivate });
   zoom.addEventListener('click', () => {
     if (!selected) return;
     redraw(new Date(Math.max(new Date(fullStart).getTime(), selected.time - 3600000)).toISOString(), new Date(Math.min(new Date(fullEnd).getTime(), selected.time + 3600000)).toISOString());
@@ -86,6 +93,7 @@ export function lineChart(container, records, { start, end, unit = '', reference
       selected = point; selectedCircle = circle;
       circle.setAttribute('r','7'); circle.setAttribute('aria-pressed','true');
       detail.textContent = description; zoom.disabled = false;
+      onActivate?.(point);
     };
     circle.addEventListener('click',selectPoint);
     circle.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectPoint();}});
@@ -114,22 +122,73 @@ export function stepsChart(container, days, start, end) {
 }
 
 export function eventChart(container, events, start, end) {
-  const begin=new Date(start).getTime(),finish=new Date(end).getTime();
-  const kinds=['bolus','basal','temp_basal','meal'];
-  const labels=['追加剂量 · U','基础率 · U/h','临时基础率 · U/h','碳水 · g'];
-  const colors=['#b476bd','#328eab','#e0a452','#50a18b'];
-  const x=t=>46+(new Date(t).getTime()-begin)/(finish-begin)*936;
-  const svg=svgNode('svg',{viewBox:'0 0 1000 250',role:'img','aria-label':'与血糖使用相同时间范围的胰岛素和饮食事件'});
-  kinds.forEach((kind,i)=>{
-    const y=48+i*48;
-    svg.append(svgNode('text',{x:46,y:y-17},labels[i]));
-    svg.append(svgNode('line',{x1:46,x2:982,y1:y,y2:y,class:'grid'}));
-    for(const event of events.filter(e=>e.kind===kind)) {
-      const left=Math.max(46,x(event.measured_at)),right=Math.min(982,x(event.ended_at || event.measured_at));
-      const shape=event.ended_at && right>left ? svgNode('rect',{x:left,y:y-5,width:Math.max(2,right-left),height:10,fill:colors[i],opacity:kind==='basal' ? .4 : .85,rx:2}) : svgNode('circle',{cx:left,cy:y,r:5,fill:colors[i]});
-      shape.append(svgNode('title',{},`${labels[i]} · ${event.value} ${event.unit}\n${new Date(event.measured_at).toLocaleString()}${event.ended_at ? ' 至 '+new Date(event.ended_at).toLocaleString() : ''}\n${event.source_ref}`));svg.append(shape);
+  const begin = new Date(start).getTime();
+  const finish = new Date(end).getTime();
+  const lanes = [
+    {kind: 'bolus', label: '追加胰岛素', unit: 'U', color: '#92509d'},
+    {kind: 'basal', label: '泵基础速率设置（推算时段）', unit: 'U/h', color: '#22758f'},
+    {kind: 'temp_basal', label: '临时基础输注', unit: 'U/h', color: '#a46417'},
+    {kind: 'meal', label: '饮食碳水', unit: 'g', color: '#258267'},
+  ];
+  if (!events.some(event => lanes.some(lane => lane.kind === event.kind))) {
+    empty(container, '当前时段暂无胰岛素或饮食记录');
+    return;
+  }
+
+  const x = time => 46 + (time - begin) / (finish - begin) * 936;
+  const timeLabel = time => new Date(time).toLocaleString('zh-CN', {hour12: false});
+  const svg = svgNode('svg', {viewBox: '0 0 1000 250', role: 'group', 'aria-label': '胰岛素与饮食时间轴'});
+  const detail = document.createElement('p');
+  detail.className = 'chart-point-detail';
+  detail.setAttribute('role', 'status');
+  detail.textContent = '点选圆点或横条，查看对应记录的时间和数值。';
+  let selected = null;
+
+  lanes.forEach(({kind, label, unit, color}, index) => {
+    const y = 48 + index * 48;
+    svg.append(svgNode('text', {x: 46, y: y - 17, class: `study-lane-${kind}`}, `${label} · ${unit}`));
+    svg.append(svgNode('line', {x1: 46, x2: 982, y1: y, y2: y, class: 'grid'}));
+    for (const event of events.filter(record => record.kind === kind)) {
+      const startTime = new Date(event.measured_at).getTime();
+      const endTime = event.ended_at ? new Date(event.ended_at).getTime() : startTime;
+      const left = x(Math.max(begin, startTime));
+      const right = x(Math.min(finish, endTime));
+      const marker = right > left
+        ? svgNode('rect', {x: left, y: y - 5, width: right - left, height: 10, fill: color, rx: 2})
+        : svgNode('circle', {cx: left, cy: y, r: 5, fill: color});
+      const when = timeLabel(startTime) + (event.ended_at ? ' 至 ' + timeLabel(endTime) : '');
+      const description = `${label} · ${event.value} ${event.unit} · ${when}`;
+      marker.setAttribute('class', kind === 'basal' && right > left
+        ? 'study-event study-event-basal' : 'study-event');
+      marker.setAttribute('role', 'button');
+      marker.setAttribute('tabindex', '0');
+      marker.setAttribute('aria-label', description);
+      marker.setAttribute('aria-pressed', 'false');
+      marker.append(svgNode('title', {}, description));
+      const activate = () => {
+        selected?.setAttribute('aria-pressed', 'false');
+        marker.setAttribute('aria-pressed', 'true');
+        selected = marker;
+        detail.textContent = description;
+      };
+      marker.addEventListener('click', activate);
+      marker.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate();
+        }
+      });
+      svg.append(marker);
     }
   });
-  for(let i=0;i<=5;i++){const t=begin+(finish-begin)*i/5,d=new Date(t);svg.append(svgNode('text',{x:x(t),y:245,'text-anchor':i===0?'start':i===5?'end':'middle'},`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`));}
-  container.replaceChildren(svg);
+  for (let index = 0; index <= 5; index++) {
+    const time = begin + (finish - begin) * index / 5;
+    const date = new Date(time);
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    svg.append(svgNode('text', {x: x(time), y: 245,
+      'text-anchor': index === 0 ? 'start' : index === 5 ? 'end' : 'middle'},
+      `${date.getMonth() + 1}/${date.getDate()} ${hours}:${minutes}`));
+  }
+  container.replaceChildren(svg, detail);
 }
