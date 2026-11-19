@@ -224,26 +224,51 @@ async def test_glucose_context_matches_same_patient_and_sample_time(client, db_s
     assert (await client.get(path, headers=doctor, params={"scope": "examples"})).status_code == 404
 
 
-async def test_simulated_sample_is_repeatable_and_links_therapy_records(client, db_session):
-    from antang_api.seed_clinical_demo import seed
+async def test_simulated_records_move_to_existing_authorized_example(client, db_session):
+    from uuid import UUID, NAMESPACE_URL, uuid5
 
-    await seed()
-    await seed()
-    _, headers = await account(client, db_session, UserRole.CLINICIAN)
+    from antang_api.models import GlucoseReading, User
+    from antang_api.models.study import StudySubject
+    from antang_api.seed_clinical_demo import BEGIN, END, DATASET, NOTE, populate
+
+    original, patient_headers = await account(client, db_session)
+    extra, _ = await account(client, db_session)
+    doctor, headers = await account(client, db_session, UserRole.CLINICIAN)
+    original_id, extra_id = UUID(original["user"]["id"]), UUID(extra["user"]["id"])
+    old = await db_session.get(User, original_id)
+    added = await db_session.get(User, extra_id)
+    assert old is not None and added is not None
+    old.username = old.username_normalized = "antang_demo_patient"
+    old.full_name = "示例患者"
+    added.username = added.username_normalized = "antang_synthetic_demo_v1"
+    added.full_name = "模拟患者（演示数据）"
+    reading_id = uuid5(NAMESPACE_URL, "antang_demo_patient:glucose:0")
+    db_session.add_all([
+        StudySubject(user_id=extra_id, dataset=DATASET, insulin_type=None, period_start=BEGIN,
+                     period_end=END, provenance={"notice": NOTE, "synthetic": True, "version": 1}),
+        GlucoseReading(id=reading_id, user_id=extra_id, value_mg_dl=105, measured_at=BEGIN, note=NOTE),
+        GlucoseReading(user_id=original_id, value_mg_dl=100, measured_at=BEGIN-timedelta(days=1)),
+    ])
+    await db_session.commit()
+    grant = await client.post("/api/v1/patient-access-grants", headers=patient_headers,
+                              json={"clinician_id": doctor["user"]["id"]})
+    assert grant.status_code == 201
+    await populate(db_session)
+    await db_session.commit()
+    await populate(db_session)
+    await db_session.commit()
     root = "/api/v1/clinical/patients"
-    listing = await client.get(root, headers=headers, params={"scope": "examples", "dataset": "demo"})
-    assert listing.status_code == 200
-    assert listing.json()["total"] == 1
-    sample = listing.json()["patients"][0]
-    assert sample["full_name"] == "模拟患者（演示数据）"
-    path = f"{root}/{sample['id']}"
-    params = {"scope": "examples", "start": "2026-11-18T16:00:00Z", "end": "2026-11-19T16:00:00Z"}
+    response = await client.get(root, headers=headers)
+    assert [row["id"] for row in response.json()["patients"]] == [str(original_id)]
+    path = f"{root}/{original_id}"
+    params = {"start": (BEGIN-timedelta(days=1)).isoformat(), "end": END.isoformat()}
     overview = (await client.get(path + "/overview", headers=headers, params=params)).json()
     assert overview["study"]["provenance"]["synthetic"] is True
-    assert overview["glucose"]["summary"]["count"] == 48
+    assert overview["glucose"]["summary"]["count"] == 49
+    assert overview["glucose"]["points"][1]["id"] == str(reading_id)
     assert overview["study"]["event_count"] == 8
-    point = overview["glucose"]["points"][16]
-    context_path = f"{path}/glucose-records/{point['id']}/context"
-    context = await client.get(context_path, headers=headers, params={"scope": "examples"})
-    assert context.status_code == 200
-    assert [event["kind"] for event in context.json()] == ["basal", "bolus", "meal"]
+    context = await client.get(f"{path}/glucose-records/{reading_id}/context", headers=headers)
+    assert [event["kind"] for event in context.json()] == ["basal"]
+    assert (await client.get(path + "/overview", headers=headers, params={"scope": "examples"})).status_code == 403
+    db_session.expire_all()
+    assert await db_session.get(User, extra_id) is None

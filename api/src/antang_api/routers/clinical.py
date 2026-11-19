@@ -28,7 +28,7 @@ Auth = Annotated[AuthenticatedSession, Depends(get_authenticated_session)]
 Database = Annotated[AsyncSession, Depends(get_session)]
 Unlock = Annotated[str | None, Header(alias="X-Clinical-Unlock", max_length=256)]
 ASSETS = Path(__file__).resolve().parents[1] / "clinical_web"
-EXAMPLE_DATASETS = ("UCI Diabetes", "OhioT1DM", "模拟演示")
+EXAMPLE_DATASETS = ("UCI Diabetes", "OhioT1DM")
 THERAPY_DATASETS = ("OhioT1DM", "模拟演示")
 PRIVATE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
@@ -80,7 +80,7 @@ async def lock_all(auth: Auth, session: Database) -> Response:
 
 
 @router.get("/api/v1/clinical/patients", response_model=ClinicalPatientPage)
-async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50, dataset: Literal["", "uci", "ohio", "demo", "cgm_pdf"] = "") -> ClinicalPatientPage:
+async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50, dataset: Literal["", "uci", "ohio", "cgm_pdf"] = "") -> ClinicalPatientPage:
     require_role(auth.user, UserRole.CLINICIAN)
     response.headers["Cache-Control"] = "no-store"
     if scope == "all":
@@ -98,7 +98,7 @@ async def patients(auth: Auth, session: Database, response: Response, unlock: Un
     if dataset == "uci":
         query = query.where(User.username_normalized.startswith("uci_diabetes_", autoescape=True))
     elif dataset:
-        dataset_name = {"ohio": "OhioT1DM", "demo": "模拟演示", "cgm_pdf": "CGM PDF"}[dataset]
+        dataset_name = {"ohio": "OhioT1DM", "cgm_pdf": "CGM PDF"}[dataset]
         query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset == dataset_name)))
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
     if after is not None:
