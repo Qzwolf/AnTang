@@ -173,7 +173,7 @@ async function loadOverview(initial = false) {
 function renderOverview() {
   const data = state.overview; if (!data) return;
   // Explicit demonstration account, never inferred from a patient's health values.
-  const demo = data.patient.username === 'antang_demo_patient';
+  const demo = data.study?.dataset === '模拟演示' || data.patient.username === 'antang_demo_patient';
   show('demo-notice', demo); show('public-notice', data.patient.username.startsWith('uci_diabetes_')); text('record-legend', demo ? '模拟演示记录' : '已保存记录');
   show('study-notice', !!data.study && !demo);
   if (data.study) {
@@ -361,7 +361,7 @@ function renderProfile(profile) {
 }
 
 function renderWearable(data) {
-  const demo = data.patient.username === 'antang_demo_patient';
+  const demo = data.study?.dataset === '模拟演示' || data.patient.username === 'antang_demo_patient';
   const cards = data.wearable.sources.map(source => {
     const card = element('article', 'card'), head = element('div', 'source-head'), name = element('div');
     name.append(element('h3', '', demo ? '模拟手环记录' : source.source_package === 'nodomain.freeyourgadget.gadgetbridge' ? 'Gadgetbridge 手环记录' : 'Zepp / Health Connect 记录'), element('small', '', `最近观测 ${dateTime(source.latest_observed_at)}`));
