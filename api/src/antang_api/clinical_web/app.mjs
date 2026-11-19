@@ -175,7 +175,7 @@ function renderOverview() {
   // Explicit demonstration account, never inferred from a patient's health values.
   const demo = data.patient.username === 'antang_demo_patient';
   show('demo-notice', demo); show('public-notice', data.patient.username.startsWith('uci_diabetes_')); text('record-legend', demo ? '模拟演示记录' : '已保存记录');
-  show('study-notice', !!data.study);
+  show('study-notice', !!data.study && !demo);
   if (data.study) {
     const notice = data.study.dataset === 'OhioT1DM' ? '匿名研究记录；日期已由原数据集脱敏平移，原时区未提供，以下按浏览器时区显示。' : data.study.provenance.notice;
     text('study-notice', `${data.study.dataset} · ${notice} 数据范围：${localDate(new Date(data.study.period_start))} 至 ${localDate(new Date(new Date(data.study.period_end).getTime()-1))}。`);
@@ -187,7 +187,7 @@ function renderOverview() {
   text('glucose-count', summary.count.toLocaleString()); text('glucose-average', value(summary.average_mg_dl));
   text('glucose-range', `${value(summary.minimum_mg_dl)} / ${value(summary.maximum_mg_dl)}`);
   text('glucose-latest', value(points.at(-1)?.value_mg_dl)); text('glucose-latest-time', points.length ? dateTime(points.at(-1).measured_at) : '所选时间范围内尚无记录');
-  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, reading: point, label: `${demo ? "模拟演示 · " : ""}${sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, onActivate: point => showGlucoseRecord(point.reading), gapHours: data.study?.dataset === 'OhioT1DM' ? 0.25 : 6, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
+  lineChart($('glucose-chart'), points.map(point => ({ time: point.measured_at, value: glucoseValue(point.value_mg_dl, unit), source: point.source, reading: point, label: `${demo ? "模拟演示" : sourceNames[point.source] || point.source} · ${contextNames[point.context] || point.context}` })), { start: data.period_start, end: data.period_end, unit: label, simulated: demo, onActivate: point => showGlucoseRecord(point.reading), gapHours: data.study?.dataset === 'OhioT1DM' ? 0.25 : 6, reference: $('show-reference').checked ? [glucoseValue(70, unit), glucoseValue(180, unit)] : null });
   text('glucose-note', data.glucose.truncated ? `该范围共 ${summary.count} 条记录，曲线展示最新 ${points.length} 条；请缩短范围查看更早细节。上方统计按全部记录计算。` : `共 ${summary.count} 条有效血糖记录，已撤回记录不参与曲线与统计。时间按当前浏览器时区显示。`);
   text('sampling-note', data.study?.dataset === 'OhioT1DM' ? 'CGM 原始采样约每 5 分钟一次；超过 15 分钟的缺口断开，不插值。数据集日期已脱敏平移，可能晚于当前日期，不代表实时测量。' : '仅连接同来源、间隔不超过 6 小时的相邻记录；离散测量不能代表连续血糖。');
   renderStudy(data);
@@ -214,7 +214,7 @@ function glucoseRecordCells(point) {
     glucoseRecordTime.format(new Date(point.measured_at)),
     glucoseValue(point.value_mg_dl, unit).toFixed(unit === 'mg' ? 0 : 2),
     contextNames[point.context] || point.context,
-    sourceNames[point.source] || point.source,
+    state.overview?.study?.dataset === '模拟演示' ? '模拟演示' : sourceNames[point.source] || point.source,
     point.note || '—',
   ];
 }
@@ -254,7 +254,7 @@ async function loadGlucoseContext(point) {
   glucoseContextRequest?.abort();
   const list = $('glucose-context-events');
   list.replaceChildren();
-  if (state.overview?.study?.dataset !== 'OhioT1DM') {
+  if (!['OhioT1DM', '模拟演示'].includes(state.overview?.study?.dataset)) {
     text('glucose-context-status', '此患者暂无可关联的胰岛素与饮食数据。');
     return;
   }
@@ -288,7 +288,7 @@ async function loadGlucoseContext(point) {
       item.append(element('strong', '', `${label} · ${event.value} ${event.unit}${suffix}`), element('span', '', times));
       list.append(item);
     }
-    text('glucose-context-status', '按时间对照记录，不能单凭时间接近判断血糖变化的原因。');
+    text('glucose-context-status', '');
   } catch (error) {
     if (controller.signal.aborted || !$('glucose-record-dialog').open) return;
     if (error.status === 403 || error.status === 404) {
@@ -505,7 +505,7 @@ function renderStudy(data) {
 
 async function loadExamples() {
   const epoch = state.epoch;
-  for (const dataset of ['uci', 'ohio']) {
+  for (const dataset of ['uci', 'ohio', 'demo']) {
     const container = $('examples-' + dataset);
     container.replaceChildren(element('p', 'list-message', '正在读取…'));
     try {

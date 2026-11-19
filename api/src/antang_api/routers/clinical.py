@@ -28,6 +28,8 @@ Auth = Annotated[AuthenticatedSession, Depends(get_authenticated_session)]
 Database = Annotated[AsyncSession, Depends(get_session)]
 Unlock = Annotated[str | None, Header(alias="X-Clinical-Unlock", max_length=256)]
 ASSETS = Path(__file__).resolve().parents[1] / "clinical_web"
+EXAMPLE_DATASETS = ("UCI Diabetes", "OhioT1DM", "模拟演示")
+THERAPY_DATASETS = ("OhioT1DM", "模拟演示")
 PRIVATE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
@@ -78,14 +80,14 @@ async def lock_all(auth: Auth, session: Database) -> Response:
 
 
 @router.get("/api/v1/clinical/patients", response_model=ClinicalPatientPage)
-async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50, dataset: Literal["", "uci", "ohio", "cgm_pdf"] = "") -> ClinicalPatientPage:
+async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50, dataset: Literal["", "uci", "ohio", "demo", "cgm_pdf"] = "") -> ClinicalPatientPage:
     require_role(auth.user, UserRole.CLINICIAN)
     response.headers["Cache-Control"] = "no-store"
     if scope == "all":
         await require_all_patients(session, auth, unlock)
     query = select(User).where(User.role == UserRole.PATIENT, User.is_active.is_(True))
     if scope == "examples":
-        query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset.in_(["UCI Diabetes", "OhioT1DM"]))))
+        query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset.in_(EXAMPLE_DATASETS))))
     if scope == "granted":
         query = query.join(PatientAccessGrant, PatientAccessGrant.patient_id == User.id).where(PatientAccessGrant.clinician_id == auth.user.id, PatientAccessGrant.revoked_at.is_(None))
     if search.strip():
@@ -96,7 +98,7 @@ async def patients(auth: Auth, session: Database, response: Response, unlock: Un
     if dataset == "uci":
         query = query.where(User.username_normalized.startswith("uci_diabetes_", autoescape=True))
     elif dataset:
-        dataset_name = {"ohio": "OhioT1DM", "cgm_pdf": "CGM PDF"}[dataset]
+        dataset_name = {"ohio": "OhioT1DM", "demo": "模拟演示", "cgm_pdf": "CGM PDF"}[dataset]
         query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset == dataset_name)))
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
     if after is not None:
@@ -125,7 +127,7 @@ async def clinical_patient(
     require_role(auth.user, UserRole.CLINICIAN)
     if scope == "examples":
         sample = await session.get(StudySubject, patient_id)
-        if sample is None or sample.dataset not in ("UCI Diabetes", "OhioT1DM"):
+        if sample is None or sample.dataset not in EXAMPLE_DATASETS:
             raise HTTPException(403, "此账号不属于示例数据集")
         session.add(PatientAccessAudit(actor_user_id=auth.user.id, patient_id=patient_id, action=f"clinical:examples:{operation}"))
     elif scope == "all":
@@ -184,7 +186,7 @@ async def glucose_record_context(
     if sample_at is None:
         raise HTTPException(404, "所选血糖记录当前不可访问")
     subject = await session.get(StudySubject, patient_id)
-    if subject is None or subject.dataset != "OhioT1DM":
+    if subject is None or subject.dataset not in THERAPY_DATASETS:
         await session.commit()
         return []
 
