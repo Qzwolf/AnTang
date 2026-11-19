@@ -505,7 +505,7 @@ function renderStudy(data) {
 
 async function loadExamples() {
   const epoch = state.epoch;
-  for (const dataset of ['uci', 'ohio', 'demo']) {
+  for (const dataset of ['uci', 'ohio']) {
     const container = $('examples-' + dataset);
     container.replaceChildren(element('p', 'list-message', '正在读取…'));
     try {
