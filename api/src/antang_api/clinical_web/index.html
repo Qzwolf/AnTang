@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>安糖心语 · 医护工作台</title>
-  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261029-point5">
-  <script type="module" src="/clinician/assets/app.mjs?v=20261029-point5"></script>
+  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261119-glucose-context">
+  <script type="module" src="/clinician/assets/app.mjs?v=20261119-glucose-context"></script>
 </head>
 <body>
   <div id="login-view" class="login-shell">
@@ -13,26 +13,67 @@
   </div>
 
   <div id="workspace" hidden>
+    <div id="workspace-header" class="workspace-header">
     <header class="topbar"><div class="brand"><img class="brand-icon" src="/clinician/assets/brand.svg" alt=""> 安糖心语 <span class="divider"></span><span class="workspace-title">医护工作台</span></div><div class="top-actions"><span class="status-dot"></span><span id="account-name"></span><span id="role-label" class="tag">医护</span><button id="logout" class="text-button">退出登录</button></div></header>
+    </div>
     <div id="notice" class="notice" role="status" hidden></div>
     <main id="clinical-view" class="workspace-layout">
-      <aside class="patient-panel"><div class="panel-top"><span class="eyebrow">患者管理</span><h2>患者列表 <span id="patient-count" class="count">0</span></h2><p id="scope-description" class="muted">查看向你授权的患者</p></div><div class="scope-switch" role="group" aria-label="患者查看范围"><button id="scope-granted" aria-pressed="true">已授权患者</button><button id="scope-all" aria-pressed="false">全部患者 <span aria-hidden="true">⌑</span></button></div><form id="search-form" class="search-form"><input id="patient-search" placeholder="搜索姓名、账号或 ID" aria-label="搜索患者" maxlength="100"><button type="submit" aria-label="搜索">⌕</button></form><div id="scope-expiry" class="scope-expiry" hidden></div><div id="patient-list" class="patient-list" aria-label="患者列表"></div><button id="more-patients" class="secondary load-more" hidden>加载更多患者</button><div class="panel-foot">患者可撤销个人授权。全部患者视图需额外验证统一密码。</div></aside>
-      <section class="detail-panel"><div id="no-patient" class="empty-main"><div class="empty-symbol"><img src="/clinician/assets/brand.svg" alt=""></div><h2>从左侧选择一位患者</h2><p>在同一时间范围内查看血糖变化与设备记录。</p></div>
+      <aside class="patient-panel"><div class="panel-top"><span class="eyebrow">患者管理</span><h2>患者列表</h2><p id="scope-description" class="muted">查看向你授权的患者</p></div><div class="scope-switch" role="group" aria-label="患者查看范围"><button id="scope-granted" aria-pressed="true">已授权患者</button><button id="scope-all" aria-pressed="false">全部患者 <span aria-hidden="true">⌑</span></button></div><form id="search-form" class="search-form"><input id="patient-search" placeholder="搜索姓名、账号或 ID" aria-label="搜索患者" maxlength="100"><button type="submit" aria-label="搜索">⌕</button></form><div id="scope-expiry" class="scope-expiry" hidden></div><details id="clinical-patients" class="example-tree"><summary>临床患者 <span id="patient-count" class="count">0</span></summary><div id="patient-list" class="patient-list" aria-label="临床患者"></div><button id="more-patients" class="secondary load-more" hidden>加载更多患者</button></details><details id="example-patients" class="example-tree"><summary>研究样本</summary><p class="caption">选择数据集查看历史记录</p><details><summary>UCI Diabetes</summary><div id="examples-uci"></div></details><details><summary>OhioT1DM</summary><div id="examples-ohio"></div></details></details><div class="panel-foot">患者可撤销个人授权。全部患者视图需额外验证统一密码。</div></aside>
+      <section class="detail-panel">
+        <nav id="feature-nav" class="feature-directory" hidden aria-label="功能导航"><strong>功能导航</strong><p id="feature-empty" class="muted">选择患者后查看</p><div id="feature-links" hidden><button type="button" data-feature="glucose-visualization" aria-pressed="false">血糖可视化</button><button type="button" id="study-link" data-feature="study-card" hidden aria-pressed="false">胰岛素与饮食</button><button type="button" id="wearable-link" data-feature="wearable-heading" hidden aria-pressed="false">手环与日常状态</button><button type="button" data-feature="profile-section" aria-pressed="false">健康档案与数据来源</button></div></nav>
+        <div id="no-patient" class="empty-main"><div class="empty-symbol"><img src="/clinician/assets/brand.svg" alt=""></div><h2>从左侧选择一位患者</h2><p>在同一时间范围内查看血糖变化与设备记录。</p></div>
         <div id="patient-detail" hidden>
-          <div class="patient-heading"><div><span class="eyebrow">健康概览</span><h1 id="patient-name"></h1><div id="patient-id" class="mono muted"></div></div><span id="access-badge" class="tag">个人授权 · 只读</span></div>
+          <div id="patient-heading-anchor" class="patient-heading"><div><span class="eyebrow">健康概览</span><h1 id="patient-name"></h1><div id="patient-id" class="mono muted"></div></div><span id="access-badge" class="tag">个人授权 · 只读</span></div>
           <p id="study-notice" class="demo-notice" hidden></p><p id="public-notice" class="demo-notice" hidden>公开数据集示例患者 · UCI Diabetes，CC BY 4.0，历史数据。请选择 1989–1991 年的相应日期查看；原时区未知，UTC 仅用于存储，显示时间按浏览器时区换算。部分纸质记录时间由原数据集按餐次指定。来源：doi:10.24432/C5T59G。</p><p id="demo-notice" class="demo-notice" hidden>示例患者 · 此账号数据为人工编造，仅用于展示界面和曲线，不是真实患者资料。</p><section class="range-bar" aria-label="查看时间范围"><div class="quick-range"><button data-days="7">近 7 天</button><button data-days="14" class="selected">近 14 天</button><button data-days="30">近 30 天</button><button data-days="90">近 90 天</button></div><form id="range-form"><input type="date" id="range-start" aria-label="开始日期" required><span>至</span><input type="date" id="range-end" aria-label="结束日期" required><button class="secondary" type="submit">查看</button></form><button id="refresh" class="text-button">↻ 刷新</button></section>
           <div id="detail-status" class="detail-status" role="status"></div>
           <div id="clinical-content" hidden>
-            <div class="metric-grid"><article class="metric"><span>血糖记录</span><strong id="glucose-count">—</strong><small>所选时间范围内</small></article><article class="metric"><span>平均血糖 <small class="unit-text">mmol/L</small></span><strong id="glucose-average">—</strong><small>按已有记录计算</small></article><article class="metric"><span>最低 / 最高 <small class="unit-text">mmol/L</small></span><strong id="glucose-range">—</strong><small>不代表无记录时段的变化</small></article><article class="metric"><span>最近一次记录</span><strong id="glucose-latest">—</strong><small id="glucose-latest-time">尚无记录</small></article></div>
-            <article class="card glucose-card"><div class="card-head"><div><span class="eyebrow">GLUCOSE · 血糖记录</span><h2>血糖变化</h2></div><div class="chart-options"><label class="check"><input type="checkbox" id="show-reference" checked>参考区间</label><select id="glucose-unit" aria-label="血糖单位"><option value="mmol">mmol/L</option><option value="mg">mg/dL</option></select></div></div><div class="chart-legend"><span><i class="legend-dot"></i><span id="record-legend">已保存记录</span></span><span><i class="legend-range"></i>参考区间 3.9–10.0 mmol/L</span></div><div id="glucose-chart" class="chart" aria-label="血糖变化曲线"></div><p id="glucose-note" class="caption"></p><p id="sampling-note" class="caption">仅连接同来源、间隔不超过 6 小时的相邻记录，空白不代表血糖平稳。离散记录不计算 TIR 或连续低血糖事件；参考线不替代患者个体化目标。</p></article>
-            <article id="study-card" class="card" hidden><div class="card-head"><h2 id="study-title">胰岛素与饮食记录</h2></div><p id="study-drug"></p><div id="report-metrics"></div><div id="study-events-area"><div id="study-chart" class="chart" aria-label="胰岛素与饮食时间轴"></div><p id="study-count" class="caption"></p><div class="table-wrap"><table><thead><tr><th>开始时间</th><th>结束时间</th><th>类型</th><th>记录值</th><th>原始类型</th><th>来源</th></tr></thead><tbody id="study-events"></tbody></table></div><p id="study-detail-note" class="caption"></p></div></article><div id="wearable-heading" class="section-title"><div><span class="eyebrow">日常健康</span><h2>手环与日常状态</h2></div><p class="muted">与血糖使用同一时间范围 · 按记录结束时间筛选</p></div><div id="wearable-sources"></div>
-            <details class="clinical-secondary"><summary>健康档案与数据来源</summary><div class="bottom-grid"><article class="card"><div class="card-head"><h2>当前健康档案</h2><span class="tag subtle">当前状态</span></div><dl id="profile-fields" class="profile-fields"></dl><div id="health-facts" class="health-facts"></div></article><article class="card"><div class="card-head"><h2>数据接入情况</h2></div><div id="data-status" class="data-status"></div><p id="data-source-note" class="caption">当前血糖曲线显示已保存的手工及报告记录，血糖设备自动同步尚未接入。</p></article></div>
-            </details><article class="card table-card"><div class="card-head"><h2>血糖记录明细</h2><span id="records-caption" class="muted"></span></div><div class="table-scroll"><table><thead><tr><th>测量时间</th><th id="value-heading">血糖 · mmol/L</th><th>场景</th><th>来源</th><th>备注</th></tr></thead><tbody id="glucose-records"></tbody></table></div></article>
+            <div class="metric-grid"><article class="metric"><span>血糖记录 <small class="metric-unit">条</small></span><strong id="glucose-count">—</strong><small>所选时间范围内</small></article><article class="metric"><span>平均血糖 <small class="metric-unit unit-text">mmol/L</small></span><strong id="glucose-average">—</strong><small>按已有记录计算</small></article><article class="metric"><span>最低 / 最高 <small class="metric-unit unit-text">mmol/L</small></span><strong id="glucose-range">—</strong><small>不代表无记录时段的变化</small></article><article class="metric"><span>最近一次记录 <small class="metric-unit unit-text">mmol/L</small></span><strong id="glucose-latest">—</strong><small id="glucose-latest-time">尚无记录</small></article></div>
+            <article id="glucose-visualization" class="card glucose-card"><div class="card-head"><div><span class="eyebrow">GLUCOSE · 血糖记录</span><h2>血糖变化</h2></div><div class="chart-options"><label class="check"><input type="checkbox" id="show-reference" checked>参考区间</label><select id="glucose-unit" aria-label="血糖单位"><option value="mmol">mmol/L</option><option value="mg">mg/dL</option></select></div></div><div class="chart-legend"><span><i class="legend-dot"></i><span id="record-legend">已保存记录</span></span><span><i class="legend-range"></i>参考区间 3.9–10.0 mmol/L</span></div><div id="glucose-chart" class="chart" aria-label="血糖变化曲线"></div><p id="glucose-note" class="caption"></p><p id="sampling-note" class="caption">仅连接同来源、间隔不超过 6 小时的相邻记录，空白不代表血糖平稳。离散记录不计算 TIR 或连续低血糖事件；参考线不替代患者个体化目标。</p></article>
+            <article id="glucose-records-section" class="card table-card"><div class="card-head"><h2>血糖记录明细</h2><span id="records-caption" class="muted"></span></div><div class="table-scroll"><table><thead><tr><th>测量时间</th><th id="value-heading">血糖 · mmol/L</th><th>场景</th><th>来源</th><th>备注</th></tr></thead><tbody id="glucose-records"></tbody></table></div><button id="more-glucose-records" class="secondary" type="button" hidden>加载更早记录</button><p id="glucose-records-status" class="caption" role="status"></p></article>
+            <article id="study-card" class="card" hidden><div class="card-head"><h2 id="study-title">胰岛素与饮食记录</h2></div><div id="report-metrics"></div><div id="study-events-area">
+              <section class="study-timeline" aria-labelledby="study-timeline-title">
+                <h3 id="study-timeline-title">胰岛素与饮食时间轴</h3>
+                <p class="caption">圆点是一笔记录，横条是持续时段。基础输注长条表示泵的速率设置在这段时间适用。常规基础速率的结束时间按下一条设置或数据结束时间推算。</p>
+                <p class="caption">临时基础速率在有效时段内替代常规基础速率。追加胰岛素的横条表示分时输注。点选标记可查看剂量（U）、速率（U/h）或碳水克数（g）。</p>
+                <div id="study-chart" class="chart" aria-label="胰岛素与饮食时间轴"></div>
+              </section>
+              <div class="study-table-head">
+                <h3>记录明细</h3>
+                <label for="study-filter">记录类型
+                  <select id="study-filter">
+                    <option value="">全部记录</option>
+                    <option value="bolus">追加胰岛素</option>
+                    <option value="basal">基础输注</option>
+                    <option value="temp_basal">临时基础输注</option>
+                    <option value="meal">饮食碳水</option>
+                    <option value="finger_stick">指尖血糖</option>
+                  </select>
+                </label>
+              </div>
+              <p id="study-count" class="caption" role="status"></p>
+              <div class="table-wrap"><table>
+                <thead><tr><th>记录时间</th><th>结束时间</th><th>记录类型</th><th>数值与单位</th></tr></thead>
+                <tbody id="study-events"></tbody>
+              </table></div>
+
+            </div></article><div id="wearable-heading" class="section-title"><div><span class="eyebrow">日常健康</span><h2>手环与日常状态</h2></div><p class="muted">与血糖使用同一时间范围 · 按记录结束时间筛选</p></div><div id="wearable-sources"></div>
+            <details id="profile-section" class="clinical-secondary"><summary>健康档案与数据来源</summary><div class="bottom-grid"><article class="card"><div class="card-head"><h2>当前健康档案</h2><span class="tag subtle">当前状态</span></div><dl id="profile-fields" class="profile-fields"></dl><div id="health-facts" class="health-facts"></div></article><article class="card"><div class="card-head"><h2>数据接入情况</h2></div><div id="data-status" class="data-status"></div><p id="data-source-note" class="caption">当前血糖曲线显示已保存的手工及报告记录，血糖设备自动同步尚未接入。</p></article></div>
+            </details>
           </div>
         </div>
       </section>
     </main>
     <main id="admin-view" class="admin-view" hidden><span class="eyebrow">访问管理</span><h1>医护统一查看密码</h1><p class="muted">医护仍需个人账号登录。统一密码用于解锁全部患者只读视图，不改变个人账号角色。</p><section class="card"><div class="card-head"><h2 id="password-config-state">读取配置中…</h2></div><form id="shared-password-form"><label>你的个人账号密码<input id="admin-account-password" type="password" autocomplete="current-password" required></label><label>新的统一查看密码<input id="new-shared-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required><small class="muted">至少 12 个字符。只向已审核医护传达。</small></label><label>再次输入统一密码<input id="confirm-shared-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label><button class="primary" type="submit">保存统一密码</button></form><p id="admin-message" role="status"></p><p class="caption">保存后，所有已解锁会话立即失效，医护下次查询必须重新验证。研发管理账号本身不能查看患者健康数据。</p></section></main>
   </div>
+  <dialog id="glucose-record-dialog" aria-labelledby="glucose-record-title">
+    <h2 id="glucose-record-title">血糖记录</h2>
+    <dl id="glucose-record-fields" class="profile-fields"></dl>
+    <section class="glucose-context" aria-labelledby="glucose-context-title">
+      <h3 id="glucose-context-title">胰岛素与饮食 · 前后 2 小时</h3>
+      <p id="glucose-context-status" class="caption" role="status"></p>
+      <ul id="glucose-context-events"></ul>
+    </section>
+    <form method="dialog" class="dialog-actions"><button class="secondary" autofocus>关闭</button></form>
+  </dialog>
   <dialog id="unlock-dialog"><form id="unlock-form"><span class="eyebrow">访问验证</span><h2>解锁全部患者视图</h2><p class="muted">此视图独立于患者个人授权。解锁后可查看全部患者的健康数据，访问将记录到你的个人医护账号。</p><label>统一查看密码<input id="unlock-password" type="password" autocomplete="off" required maxlength="128"></label><p id="unlock-error" class="error" role="alert"></p><p class="caption">统一密码固定有效，不设置自动过期；解锁不设定时到期，仅限当前登录会话。错误验证过多会暂时锁定该账号的验证入口。</p><div class="dialog-actions"><button id="cancel-unlock" type="button" class="secondary">取消</button><button type="submit" class="primary">验证并解锁</button></div></form></dialog>
 </body></html>

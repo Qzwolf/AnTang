@@ -1,7 +1,7 @@
 """医护浏览器工作台：个人授权与统一密码解锁的全体患者视图。"""
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -18,9 +18,10 @@ from antang_api.patient_access import check_patient_access, get_researcher_user,
 from antang_api.routers.auth import AuthenticatedSession, get_authenticated_session
 from antang_api.routers.health_profile import read_health_profile
 from antang_api.schemas.auth import UserResponse
-from antang_api.schemas.clinical import ClinicalAccessStatus, ClinicalGlucose, ClinicalGlucoseSummary, ClinicalOverview, ClinicalPasswordRequest, ClinicalPatientPage, ClinicalScope, ClinicalUnlockRequest, ClinicalUnlockResponse
+from antang_api.schemas.clinical import ClinicalAccessStatus, ClinicalGlucose, ClinicalGlucosePage, ClinicalGlucoseSummary, ClinicalOverview, ClinicalPasswordRequest, ClinicalPatientPage, ClinicalScope, ClinicalUnlockRequest, ClinicalUnlockResponse, StudyEventResponse
 from antang_api.schemas.glucose import GlucoseReadingResponse
 from antang_api.study import read_study
+from antang_api.models.study import StudyEvent, StudySubject
 
 router = APIRouter(tags=["clinical-workbench"])
 Auth = Annotated[AuthenticatedSession, Depends(get_authenticated_session)]
@@ -77,18 +78,26 @@ async def lock_all(auth: Auth, session: Database) -> Response:
 
 
 @router.get("/api/v1/clinical/patients", response_model=ClinicalPatientPage)
-async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50) -> ClinicalPatientPage:
+async def patients(auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", after: UUID | None = None, search: Annotated[str, Query(max_length=100)] = "", limit: Annotated[int, Query(ge=1, le=100)] = 50, dataset: Literal["", "uci", "ohio", "cgm_pdf"] = "") -> ClinicalPatientPage:
     require_role(auth.user, UserRole.CLINICIAN)
     response.headers["Cache-Control"] = "no-store"
     if scope == "all":
         await require_all_patients(session, auth, unlock)
     query = select(User).where(User.role == UserRole.PATIENT, User.is_active.is_(True))
+    if scope == "examples":
+        query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset.in_(["UCI Diabetes", "OhioT1DM"]))))
     if scope == "granted":
         query = query.join(PatientAccessGrant, PatientAccessGrant.patient_id == User.id).where(PatientAccessGrant.clinician_id == auth.user.id, PatientAccessGrant.revoked_at.is_(None))
     if search.strip():
         literal = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = "%" + literal + "%"
         query = query.where(or_(User.full_name.ilike(pattern, escape="\\"), User.username.ilike(pattern, escape="\\"), cast(User.id, String).ilike(pattern, escape="\\")))
+    # Filter before counting and pagination; preserve the authorized patient scope.
+    if dataset == "uci":
+        query = query.where(User.username_normalized.startswith("uci_diabetes_", autoescape=True))
+    elif dataset:
+        dataset_name = {"ohio": "OhioT1DM", "cgm_pdf": "CGM PDF"}[dataset]
+        query = query.where(User.id.in_(select(StudySubject.user_id).where(StudySubject.dataset == dataset_name)))
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
     if after is not None:
         query = query.where(User.id > after)
@@ -109,19 +118,98 @@ def period(start: datetime | None, end: datetime | None) -> tuple[datetime, date
     return begin, finish
 
 
+async def clinical_patient(
+    session: AsyncSession, auth: AuthenticatedSession, patient_id: UUID,
+    scope: ClinicalScope, unlock: str | None, operation: str,
+) -> User:
+    require_role(auth.user, UserRole.CLINICIAN)
+    if scope == "examples":
+        sample = await session.get(StudySubject, patient_id)
+        if sample is None or sample.dataset not in ("UCI Diabetes", "OhioT1DM"):
+            raise HTTPException(403, "此账号不属于示例数据集")
+        session.add(PatientAccessAudit(actor_user_id=auth.user.id, patient_id=patient_id, action=f"clinical:examples:{operation}"))
+    elif scope == "all":
+        await require_all_patients(session, auth, unlock)
+        session.add(PatientAccessAudit(actor_user_id=auth.user.id, patient_id=patient_id, action=f"clinical:all:{operation}"))
+    else:
+        await check_patient_access(session, clinician=auth.user, patient_id=patient_id, resource=f"clinical_{operation}")
+    patient = await session.scalar(select(User).where(User.id == patient_id, User.role == UserRole.PATIENT, User.is_active.is_(True)))
+    if patient is None:
+        raise HTTPException(404, "患者账号当前不可访问")
+    return patient
+
+
+@router.get("/api/v1/clinical/patients/{patient_id}/glucose-records")
+async def glucose_records(
+    patient_id: UUID, auth: Auth, session: Database, response: Response,
+    before_time: datetime, before_id: UUID, unlock: Unlock = None,
+    scope: ClinicalScope = "granted", start: datetime | None = None, end: datetime | None = None,
+) -> ClinicalGlucosePage:
+    response.headers["Cache-Control"] = "no-store"
+    await clinical_patient(session, auth, patient_id, scope, unlock, "glucose_records")
+    begin, finish = period(start, end)
+    if before_time.tzinfo is None or not begin <= before_time < finish:
+        raise HTTPException(422, "血糖记录分页位置不在所选时间范围内")
+    page_size = 200
+    rows = list(await session.scalars(
+        select(GlucoseReading).where(
+            GlucoseReading.user_id == patient_id,
+            GlucoseReading.revoked_at.is_(None),
+            GlucoseReading.measured_at >= begin,
+            or_(
+                GlucoseReading.measured_at < before_time,
+                (GlucoseReading.measured_at == before_time) & (GlucoseReading.id < before_id),
+            ),
+        ).order_by(GlucoseReading.measured_at.desc(), GlucoseReading.id.desc()).limit(page_size + 1)
+    ))
+    await session.commit()
+    return ClinicalGlucosePage(
+        points=[GlucoseReadingResponse.model_validate(point) for point in rows[:page_size]],
+        has_more=len(rows) > page_size,
+    )
+
+
+@router.get("/api/v1/clinical/patients/{patient_id}/glucose-records/{reading_id}/context")
+async def glucose_record_context(
+    patient_id: UUID, reading_id: UUID, auth: Auth, session: Database,
+    response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted",
+) -> list[StudyEventResponse]:
+    response.headers["Cache-Control"] = "no-store"
+    await clinical_patient(session, auth, patient_id, scope, unlock, "glucose_context")
+    sample_at = await session.scalar(select(GlucoseReading.measured_at).where(
+        GlucoseReading.id == reading_id,
+        GlucoseReading.user_id == patient_id,
+        GlucoseReading.revoked_at.is_(None),
+    ))
+    if sample_at is None:
+        raise HTTPException(404, "所选血糖记录当前不可访问")
+    subject = await session.get(StudySubject, patient_id)
+    if subject is None or subject.dataset != "OhioT1DM":
+        await session.commit()
+        return []
+
+    begin, finish = sample_at - timedelta(hours=2), sample_at + timedelta(hours=2)
+    events = await session.scalars(select(StudyEvent).where(
+        StudyEvent.user_id == patient_id,
+        or_(
+            (StudyEvent.kind == "basal")
+            & (StudyEvent.measured_at <= sample_at) & (StudyEvent.ended_at > sample_at),
+            StudyEvent.kind.in_(("bolus", "temp_basal", "meal"))
+            & (StudyEvent.measured_at <= finish)
+            & or_(StudyEvent.measured_at >= begin, StudyEvent.ended_at > begin),
+        ),
+    ).order_by(StudyEvent.measured_at, StudyEvent.id))
+    result = [StudyEventResponse.model_validate(event) for event in events]
+    await session.commit()
+    return result
+
+
 @router.get("/api/v1/clinical/patients/{patient_id}/overview", response_model=ClinicalOverview)
 async def overview(patient_id: UUID, auth: Auth, session: Database, response: Response, unlock: Unlock = None, scope: ClinicalScope = "granted", start: datetime | None = None, end: datetime | None = None) -> ClinicalOverview:
     require_role(auth.user, UserRole.CLINICIAN)
     response.headers["Cache-Control"] = "no-store"
     begin, finish = period(start, end)
-    if scope == "all":
-        await require_all_patients(session, auth, unlock)
-        session.add(PatientAccessAudit(actor_user_id=auth.user.id, patient_id=patient_id, action="clinical:all:overview"))
-    else:
-        await check_patient_access(session, clinician=auth.user, patient_id=patient_id, resource="clinical_overview")
-    patient = await session.scalar(select(User).where(User.id == patient_id, User.role == UserRole.PATIENT, User.is_active.is_(True)))
-    if patient is None:
-        raise HTTPException(404, "患者账号当前不可访问")
+    patient = await clinical_patient(session, auth, patient_id, scope, unlock, "overview")
     condition = (GlucoseReading.user_id == patient_id, GlucoseReading.revoked_at.is_(None), GlucoseReading.measured_at >= begin, GlucoseReading.measured_at < finish)
     count, average, minimum, maximum = (await session.execute(select(func.count(GlucoseReading.id), func.avg(GlucoseReading.value_mg_dl), func.min(GlucoseReading.value_mg_dl), func.max(GlucoseReading.value_mg_dl)).where(*condition))).one()
     points = list(await session.scalars(select(GlucoseReading).where(*condition).order_by(GlucoseReading.measured_at.desc(), GlucoseReading.id.desc()).limit(5000)))

@@ -7,7 +7,7 @@ from antang_api.schemas.auth import UserResponse
 from antang_api.schemas.glucose import GlucoseReadingResponse
 from antang_api.schemas.health_profile import HealthProfileResponse, WearableDashboardResponse
 
-ClinicalScope = Literal["granted", "all"]
+ClinicalScope = Literal["granted", "all", "examples"]
 
 
 class ClinicalUnlockRequest(BaseModel):
@@ -50,6 +50,11 @@ class ClinicalGlucose(BaseModel):
     points: list[GlucoseReadingResponse]
     truncated: bool
     limit: int
+
+
+class ClinicalGlucosePage(BaseModel):
+    points: list[GlucoseReadingResponse]
+    has_more: bool
 
 
 class StudyEventResponse(BaseModel):

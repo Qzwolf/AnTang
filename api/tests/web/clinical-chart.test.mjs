@@ -21,20 +21,27 @@ test('Ohio CGM preserves 5 minute samples and breaks gaps longer than 15 minutes
  assert.deepEqual(chartLayout(data,'2027-05-19','2027-05-20',.25).segments.map(s=>s.length),[2,1]);
 });
 
-test('click exposes exact values and zoom/reset preserve samples',()=>{
+test('point activation returns the corresponding record and the chart restores the full span',()=>{
  class Node {constructor(tag){this.tag=tag;this.children=[];this.attrs={};this.events={};}setAttribute(k,v){this.attrs[k]=v;}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}addEventListener(k,fn){this.events[k]=fn;}}
  const previous=globalThis.document;
  globalThis.document={createElement:tag=>new Node(tag),createElementNS:(_,tag)=>new Node(tag)};
  try{
  const container=new Node('div');
+ const opened = [];
  const records=[0,1,5].map(hour=>({time:'2027-05-19T0'+hour+':00:00Z',value:5.55+hour,source:'ohio_cgm'}));
- lineChart(container,records,{start:'2027-05-19T00:00:00Z',end:'2027-05-20T00:00:00Z',unit:'mmol/L'});
+ lineChart(container,records,{start:'2027-05-19T00:00:00Z',end:'2027-05-20T00:00:00Z',unit:'mmol/L',onActivate: point => opened.push(point)});
  const points=()=>container.children[0].children.filter(n=>n.tag==='circle');
+ assert.ok(Number(points().at(-1).attrs.cx) < 300);
+ assert.equal(container.children[0].children.filter(node => node.tag === 'path').length, 1);
+ assert.equal(container.children[2].children[1].disabled, true);
  points()[1].events.click();
+ assert.equal(opened[0].time, Date.parse(records[1].time));
  assert.ok(container.children[1].textContent.includes('6.55 mmol/L'));
  assert.equal(points()[1].attrs['aria-pressed'],'true');
  container.children[2].children[0].events.click();assert.equal(points().length,2);
  container.children[2].children[1].events.click();assert.equal(points().length,3);
+ assert.ok(Number(points().at(-1).attrs.cx) < 300);
+ assert.equal(container.children[2].children[1].disabled, true);
  assert.equal(records.length,3);
  }finally{globalThis.document=previous;}
 });

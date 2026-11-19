@@ -98,6 +98,16 @@ async def import_records(data: dict) -> dict:
             saved = list(await session.scalars(select(GlucoseReading).where(
                 GlucoseReading.user_id == user.id, GlucoseReading.source == 'public_dataset')))
             assert len(saved) == len(records), 'Imported count mismatch'
+            # Persist explicit dataset membership and its historical date range.
+            from antang_api.models.study import StudySubject
+            from datetime import timedelta
+            if await session.get(StudySubject, user.id) is None:
+                session.add(StudySubject(user_id=user.id, dataset='UCI Diabetes', insulin_type=None,
+                    period_start=min(row.measured_at for row in saved),
+                    period_end=max(row.measured_at for row in saved) + timedelta(seconds=1),
+                    provenance={'notice': '公开历史数据，原时区未知，UTC 仅用于存储。',
+                                'citation': 'doi:10.24432/C5T59G'}))
+
             summary[subject] = {'patient_id': str(user.id), 'username': username, 'count': len(saved),
                                 'added': added, 'rejected': rejected,
                                 'start': min(r['measured_at'] for r in records).isoformat(),
