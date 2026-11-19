@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -737,9 +737,15 @@ async def test_stream_chat_run_completes_and_persists_result(
     assert run.output_tokens == 3
 
 
+@pytest.mark.parametrize(
+    ("hour", "expected_phrase"),
+    [(1, "在用户口中「今天」"), (12, "用户口中的「今天」")],
+)
 async def test_stream_chat_run_tells_the_model_which_day_it_is(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    hour: int,
+    expected_phrase: str,
 ) -> None:
     """提示词里的「今天」按用户的睡眠日算，不是日历日。"""
 
@@ -751,8 +757,14 @@ async def test_stream_chat_run_tells_the_model_which_day_it_is(
         AsyncMock(return_value=prepared_context()),
     )
     fake_agent = FakeAgent([message_event("收到"), values_event("收到。")])
-    # 算前后两次，避免测试刚好跨过凌晨 4 点的边界。
-    day_before = subjective_day(datetime.now(timezone.utc))
+    moment = datetime(2026, 11, 19, hour, tzinfo=timezone.utc)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(chat, "datetime", FixedClock)
 
     async for _ in stream_chat_run(
         session=db_session,
@@ -765,11 +777,10 @@ async def test_stream_chat_run_tells_the_model_which_day_it_is(
     ):
         pass
 
-    day_after = subjective_day(datetime.now(timezone.utc))
     rendered = rendered_prompt(fake_agent)
     assert "[当前时间]" in rendered
-    assert "用户口中的「今天」" in rendered
-    assert str(day_before) in rendered or str(day_after) in rendered
+    assert expected_phrase in rendered
+    assert str(subjective_day(moment)) in rendered
 
 
 async def test_stream_chat_run_never_forwards_internal_subagent_text(
