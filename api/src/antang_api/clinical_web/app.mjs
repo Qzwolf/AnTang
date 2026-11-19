@@ -229,8 +229,21 @@ function showGlucoseRecord(point) {
     return field;
   }));
   if (!dialog.open) dialog.showModal();
+  $('glucose-dialog-body').scrollTop = 0;
   void loadGlucoseContext(point);
 }
+
+// Scroll the record even if the pointer is over the modal header or its backdrop.
+document.addEventListener('wheel', event => {
+  if (!$('glucose-record-dialog').open || event.ctrlKey || !event.deltaY) return;
+  const body = $('glucose-dialog-body');
+  if (body.contains(event.target)) return;
+  event.preventDefault();
+  const mode = event.deltaMode;
+  const scale = mode === WheelEvent.DOM_DELTA_PAGE ? body.clientHeight
+    : mode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+  body.scrollTop += event.deltaY * scale;
+}, {capture: true, passive: false});
 
 let glucoseContextRequest;
 $('glucose-record-dialog').addEventListener('close', () => {

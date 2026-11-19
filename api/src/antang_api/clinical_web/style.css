@@ -161,7 +161,48 @@ th, td { font-size: 16px !important; }
 .chart .study-lane-temp_basal { fill: #a46417; }
 .chart .study-lane-meal { fill: #258267; }
 
-#glucose-record-dialog { max-width: 640px; max-height: calc(100dvh - 32px); overflow: auto; }
+html:has(#glucose-record-dialog[open]),
+body:has(#glucose-record-dialog[open]) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+#glucose-record-dialog {
+  width: min(440px, calc(100% - 24px));
+  max-height: min(62dvh, 520px);
+  padding: 0;
+  border-radius: 14px;
+  overflow: hidden;
+}
+#glucose-record-dialog[open] { display: flex; flex-direction: column; }
+.glucose-dialog-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.glucose-dialog-header h2 { margin: 0; font-size: 21px; }
+.glucose-dialog-close {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #173c30;
+  font-size: 26px;
+  line-height: 1;
+}
+.glucose-dialog-close:hover { background: #eaf6f0; }
+.glucose-dialog-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 14px 12px;
+}
+.glucose-dialog-body .profile-fields { gap: 12px; margin: 12px 0; }
+.glucose-dialog-body .profile-fields > div:last-child { grid-column: 1 / -1; }
+.glucose-dialog-body dd { overflow-wrap: anywhere; }
 .glucose-context { margin-bottom: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .glucose-context h3 { font-size: 19px; margin: 0; }
 #glucose-context-events { list-style: none; margin: 0; padding: 0; }

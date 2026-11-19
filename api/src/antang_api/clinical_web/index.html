@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>安糖心语 · 医护工作台</title>
-  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261119-glucose-context">
-  <script type="module" src="/clinician/assets/app.mjs?v=20261119-glucose-context"></script>
+  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261119-compact-record-dialog">
+  <script type="module" src="/clinician/assets/app.mjs?v=20261119-compact-record-dialog"></script>
 </head>
 <body>
   <div id="login-view" class="login-shell">
@@ -66,14 +66,20 @@
     <main id="admin-view" class="admin-view" hidden><span class="eyebrow">访问管理</span><h1>医护统一查看密码</h1><p class="muted">医护仍需个人账号登录。统一密码用于解锁全部患者只读视图，不改变个人账号角色。</p><section class="card"><div class="card-head"><h2 id="password-config-state">读取配置中…</h2></div><form id="shared-password-form"><label>你的个人账号密码<input id="admin-account-password" type="password" autocomplete="current-password" required></label><label>新的统一查看密码<input id="new-shared-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required><small class="muted">至少 12 个字符。只向已审核医护传达。</small></label><label>再次输入统一密码<input id="confirm-shared-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label><button class="primary" type="submit">保存统一密码</button></form><p id="admin-message" role="status"></p><p class="caption">保存后，所有已解锁会话立即失效，医护下次查询必须重新验证。研发管理账号本身不能查看患者健康数据。</p></section></main>
   </div>
   <dialog id="glucose-record-dialog" aria-labelledby="glucose-record-title">
-    <h2 id="glucose-record-title">血糖记录</h2>
-    <dl id="glucose-record-fields" class="profile-fields"></dl>
-    <section class="glucose-context" aria-labelledby="glucose-context-title">
-      <h3 id="glucose-context-title">胰岛素与饮食 · 前后 2 小时</h3>
-      <p id="glucose-context-status" class="caption" role="status"></p>
-      <ul id="glucose-context-events"></ul>
-    </section>
-    <form method="dialog" class="dialog-actions"><button class="secondary" autofocus>关闭</button></form>
+    <header class="glucose-dialog-header">
+      <h2 id="glucose-record-title">血糖记录</h2>
+      <form method="dialog">
+        <button class="glucose-dialog-close" type="submit" aria-label="关闭血糖记录" autofocus>×</button>
+      </form>
+    </header>
+    <div id="glucose-dialog-body" class="glucose-dialog-body">
+      <dl id="glucose-record-fields" class="profile-fields"></dl>
+      <section class="glucose-context" aria-labelledby="glucose-context-title">
+        <h3 id="glucose-context-title">胰岛素与饮食 · 前后 2 小时</h3>
+        <p id="glucose-context-status" class="caption" role="status"></p>
+        <ul id="glucose-context-events"></ul>
+      </section>
+    </div>
   </dialog>
   <dialog id="unlock-dialog"><form id="unlock-form"><span class="eyebrow">访问验证</span><h2>解锁全部患者视图</h2><p class="muted">此视图独立于患者个人授权。解锁后可查看全部患者的健康数据，访问将记录到你的个人医护账号。</p><label>统一查看密码<input id="unlock-password" type="password" autocomplete="off" required maxlength="128"></label><p id="unlock-error" class="error" role="alert"></p><p class="caption">统一密码固定有效，不设置自动过期；解锁不设定时到期，仅限当前登录会话。错误验证过多会暂时锁定该账号的验证入口。</p><div class="dialog-actions"><button id="cancel-unlock" type="button" class="secondary">取消</button><button type="submit" class="primary">验证并解锁</button></div></form></dialog>
 </body></html>
