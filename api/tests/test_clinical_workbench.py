@@ -222,3 +222,28 @@ async def test_glucose_context_matches_same_patient_and_sample_time(client, db_s
     point.revoked_at = now
     await db_session.commit()
     assert (await client.get(path, headers=doctor, params={"scope": "examples"})).status_code == 404
+
+
+async def test_simulated_sample_is_repeatable_and_links_therapy_records(client, db_session):
+    from antang_api.seed_clinical_demo import seed
+
+    await seed()
+    await seed()
+    _, headers = await account(client, db_session, UserRole.CLINICIAN)
+    root = "/api/v1/clinical/patients"
+    listing = await client.get(root, headers=headers, params={"scope": "examples", "dataset": "demo"})
+    assert listing.status_code == 200
+    assert listing.json()["total"] == 1
+    sample = listing.json()["patients"][0]
+    assert sample["full_name"] == "模拟患者（演示数据）"
+    path = f"{root}/{sample['id']}"
+    params = {"scope": "examples", "start": "2026-11-18T16:00:00Z", "end": "2026-11-19T16:00:00Z"}
+    overview = (await client.get(path + "/overview", headers=headers, params=params)).json()
+    assert overview["study"]["provenance"]["synthetic"] is True
+    assert overview["glucose"]["summary"]["count"] == 48
+    assert overview["study"]["event_count"] == 8
+    point = overview["glucose"]["points"][16]
+    context_path = f"{path}/glucose-records/{point['id']}/context"
+    context = await client.get(context_path, headers=headers, params={"scope": "examples"})
+    assert context.status_code == 200
+    assert [event["kind"] for event in context.json()] == ["basal", "bolus", "meal"]

@@ -239,3 +239,5 @@ body:has(#glucose-record-dialog[open]) {
   stroke-width: 2;
   stroke-dasharray: 5 3;
 }
+
+#glucose-context-status:empty { display: none; }
