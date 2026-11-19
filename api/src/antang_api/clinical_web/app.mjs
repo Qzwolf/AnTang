@@ -1,4 +1,4 @@
-import { glucoseValue, lineChart, stepsChart, eventChart } from './chart.mjs?v=20261118-study-timeline';
+import { glucoseValue, lineChart, stepsChart, eventChart } from './chart.mjs?v=20261119-pump-rate-style';
 
 const $ = id => document.getElementById(id);
 const state = { access: null, refresh: null, user: null, unlock: null, expiry: null, configured: false, scope: 'granted', patients: [], next: null, selected: null, overview: null, epoch: 0, request: null };

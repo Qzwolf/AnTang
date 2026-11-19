@@ -126,7 +126,7 @@ export function eventChart(container, events, start, end) {
   const finish = new Date(end).getTime();
   const lanes = [
     {kind: 'bolus', label: '追加胰岛素', unit: 'U', color: '#92509d'},
-    {kind: 'basal', label: '基础输注', unit: 'U/h', color: '#22758f'},
+    {kind: 'basal', label: '泵基础速率设置（推算时段）', unit: 'U/h', color: '#22758f'},
     {kind: 'temp_basal', label: '临时基础输注', unit: 'U/h', color: '#a46417'},
     {kind: 'meal', label: '饮食碳水', unit: 'g', color: '#258267'},
   ];
@@ -158,7 +158,8 @@ export function eventChart(container, events, start, end) {
         : svgNode('circle', {cx: left, cy: y, r: 5, fill: color});
       const when = timeLabel(startTime) + (event.ended_at ? ' 至 ' + timeLabel(endTime) : '');
       const description = `${label} · ${event.value} ${event.unit} · ${when}`;
-      marker.setAttribute('class', 'study-event');
+      marker.setAttribute('class', kind === 'basal' && right > left
+        ? 'study-event study-event-basal' : 'study-event');
       marker.setAttribute('role', 'button');
       marker.setAttribute('tabindex', '0');
       marker.setAttribute('aria-label', description);

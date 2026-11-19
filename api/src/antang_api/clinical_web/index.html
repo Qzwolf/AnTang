@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>安糖心语 · 医护工作台</title>
-  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261119-compact-record-dialog">
-  <script type="module" src="/clinician/assets/app.mjs?v=20261119-compact-record-dialog"></script>
+  <link rel="stylesheet" href="/clinician/assets/style.css?v=20261119-pump-rate-style">
+  <script type="module" src="/clinician/assets/app.mjs?v=20261119-pump-rate-style"></script>
 </head>
 <body>
   <div id="login-view" class="login-shell">
@@ -33,8 +33,8 @@
             <article id="study-card" class="card" hidden><div class="card-head"><h2 id="study-title">胰岛素与饮食记录</h2></div><div id="report-metrics"></div><div id="study-events-area">
               <section class="study-timeline" aria-labelledby="study-timeline-title">
                 <h3 id="study-timeline-title">胰岛素与饮食时间轴</h3>
-                <p class="caption">圆点是一笔记录，横条是持续时段。基础输注长条表示泵的速率设置在这段时间适用。常规基础速率的结束时间按下一条设置或数据结束时间推算。</p>
-                <p class="caption">临时基础速率在有效时段内替代常规基础速率。追加胰岛素的横条表示分时输注。点选标记可查看剂量（U）、速率（U/h）或碳水克数（g）。</p>
+                <p class="caption">蓝色虚线长条表示泵的常规基础速率设置。它可能横跨全天，结束时间由下一条设置或数据结束时间推算，不能据此确认泵全程实际输注。</p>
+                <p class="caption">橙色条是覆盖常规设置的临时速率，紫色是追加剂量，绿色是饮食碳水。点选标记可查看时间和数值。</p>
                 <div id="study-chart" class="chart" aria-label="胰岛素与饮食时间轴"></div>
               </section>
               <div class="study-table-head">

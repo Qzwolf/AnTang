@@ -208,3 +208,34 @@ body:has(#glucose-record-dialog[open]) {
 #glucose-context-events { list-style: none; margin: 0; padding: 0; }
 #glucose-context-events li { padding: 9px 0; border-bottom: 1px solid var(--line); }
 #glucose-context-events span { display: block; font-size: 15px; color: var(--muted); }
+
+/* Both control bars share the same surface and selected-button treatment. */
+#feature-nav, .range-bar {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px !important;
+}
+.range-bar .quick-range { gap: 6px; padding: 3px; background: transparent; }
+.range-bar .quick-range button {
+  min-height: 40px;
+  padding: 6px 12px;
+  border: 1px solid #8eafa1;
+  border-radius: 6px;
+  background: #fff;
+  color: #174b3b;
+  font-weight: 650;
+  box-shadow: 0 2px 3px #173c3024;
+}
+.range-bar .quick-range button:hover { background: #e0f1e9; border-color: #568c77; }
+.range-bar .quick-range button.selected {
+  background: #17664f;
+  border-color: #17664f;
+  color: #fff;
+  box-shadow: 0 2px 4px #173c3033;
+}
+.study-event-basal {
+  fill: #dcebf1;
+  stroke: #22758f;
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+}
