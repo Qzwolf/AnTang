@@ -9,7 +9,8 @@ from antang_api.import_ohio import apply_subject, insert_rows
 from antang_api.models import GlucoseReading
 from antang_api.models.study import StudyEvent
 
-USERNAME = "antang_demo_patient"
+USERNAME = "antang_synthetic_demo_v1"
+RECORD_KEY = "antang_demo_patient"  # Keep record IDs stable when the demo account name changes.
 DATASET = "模拟演示"
 NOTE = "虚构演示记录，非真实患者数据或用药建议。"
 BEGIN = datetime(2026, 11, 18, 16, tzinfo=UTC)
@@ -41,13 +42,13 @@ async def seed() -> None:
                 {"notice": NOTE, "synthetic": True, "version": 1},
             )
             glucose = [
-                {"id": uuid5(NAMESPACE_URL, f"{USERNAME}:glucose:{index}"),
+                {"id": uuid5(NAMESPACE_URL, f"{RECORD_KEY}:glucose:{index}"),
                  "user_id": user_id, "measured_at": BEGIN + timedelta(minutes=30 * index),
                  "value_mg_dl": value, "source": "manual", "context": "other", "note": NOTE}
                 for index, value in enumerate(VALUES)
             ]
             events = [
-                {"id": uuid5(NAMESPACE_URL, f"{USERNAME}:event:{index}"),
+                {"id": uuid5(NAMESPACE_URL, f"{RECORD_KEY}:event:{index}"),
                  "user_id": user_id, "kind": kind, "value": value, "unit": unit,
                  "measured_at": BEGIN + timedelta(hours=start),
                  "ended_at": BEGIN + timedelta(hours=end) if end is not None else None,
