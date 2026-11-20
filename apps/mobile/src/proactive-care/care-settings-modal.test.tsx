@@ -198,6 +198,7 @@ describe('CareSettingsModal', () => {
           backgroundHealthStatus="disabled"
           notificationPermission="granted"
           notificationRegistrationFailed
+          notificationError="通知注册超时，请检查网络和 Google Play 服务后重试。"
           notificationRequesting={false}
           onClose={jest.fn()}
           onDisableBackgroundHealth={jest.fn()}
@@ -214,6 +215,12 @@ describe('CareSettingsModal', () => {
       }),
     ).toBeTruthy();
     expect(tree!.root.findByProps({ children: '重新连接推送' })).toBeTruthy();
+    // 只说「暂未连接」患者没法自救：把具体原因也写出来。
+    expect(
+      tree!.root.findByProps({
+        children: '通知注册超时，请检查网络和 Google Play 服务后重试。',
+      }),
+    ).toBeTruthy();
     act(() => tree!.unmount());
   });
 

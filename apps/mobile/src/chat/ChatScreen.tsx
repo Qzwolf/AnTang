@@ -1234,6 +1234,7 @@ function ChatScreenContent({
           backgroundHealthStatus={healthConnect.backgroundStatus}
           notificationPermission={notifications.permission}
           notificationRegistrationFailed={notifications.registrationFailed}
+          notificationError={notifications.registrationError}
           notificationRequesting={notifications.requestingPermission}
           onClose={() => setShowCareSettings(false)}
           onDisableBackgroundHealth={healthConnect.disableBackground}

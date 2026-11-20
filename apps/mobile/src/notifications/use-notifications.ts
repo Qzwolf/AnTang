@@ -46,6 +46,8 @@ export function useNotifications({
 }: Options) {
   const [permission, setPermission] = useState<PushPermission | null>(null);
   const [registrationFailed, setRegistrationFailed] = useState(false);
+  // 连不上推送时留一句话：患者只看到「暂未连接」是没法自救的。
+  const [registrationError, setRegistrationError] = useState<string | null>(null);
   const [requestingPermission, setRequestingPermission] = useState(false);
   const automaticSync = useRef<Promise<PushPermission> | null>(null);
   const observedPermission = useRef<PushPermission | null>(null);
@@ -175,6 +177,7 @@ export function useNotifications({
         if (mounted.current && currentUserId.current === userId) {
           setPermission(status);
           setRegistrationFailed(false);
+          setRegistrationError(null);
         }
         if (automaticSync.current === request) automaticSync.current = null;
       },
@@ -184,6 +187,7 @@ export function useNotifications({
           if (status !== null) {
             setPermission(status);
             setRegistrationFailed(status === 'granted');
+            setRegistrationError(errorMessage(error));
           }
           onErrorRef.current(errorMessage(error));
         }
@@ -253,11 +257,13 @@ export function useNotifications({
       () => {
         if (mounted.current && currentUserId.current === userId) {
           setRegistrationFailed(false);
+          setRegistrationError(null);
         }
       },
       (error) => {
         if (mounted.current && currentUserId.current === userId) {
           setRegistrationFailed(true);
+          setRegistrationError(errorMessage(error));
           onErrorRef.current(errorMessage(error));
         }
       },
@@ -277,6 +283,7 @@ export function useNotifications({
       if (mounted.current && currentUserId.current === userId) {
         setPermission(status);
         setRegistrationFailed(false);
+        setRegistrationError(null);
       }
       return status;
     } catch (error) {
@@ -285,6 +292,7 @@ export function useNotifications({
         if (status !== null) {
           setPermission(status);
           setRegistrationFailed(status === 'granted');
+          setRegistrationError(errorMessage(error));
         }
       }
       throw error;
@@ -298,6 +306,7 @@ export function useNotifications({
   return {
     permission,
     registrationFailed,
+    registrationError,
     requestPermission,
     requestingPermission,
   };

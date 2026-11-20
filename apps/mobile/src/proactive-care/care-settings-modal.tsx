@@ -31,6 +31,8 @@ type Props = {
   backgroundHealthStatus: BackgroundHealthSyncStatus | 'checking';
   notificationPermission: PushPermission | null;
   notificationRegistrationFailed: boolean;
+  /** 连不上推送时把具体原因写出来，否则患者只看到「暂未连接」没法自救。 */
+  notificationError?: string | null;
   notificationRequesting: boolean;
   onClose: () => void;
   onDisableBackgroundHealth: () => Promise<void>;
@@ -85,6 +87,7 @@ export function CareSettingsModal({
   backgroundHealthStatus,
   notificationPermission,
   notificationRegistrationFailed,
+  notificationError = null,
   notificationRequesting,
   onClose,
   onDisableBackgroundHealth,
@@ -451,6 +454,11 @@ export function CareSettingsModal({
                         ? '正在读取系统通知状态…'
                         : permissionLabels[notificationPermission]}
                   </Text>
+                  {notificationRegistrationFailed && notificationError ? (
+                    <Text selectable style={styles.description}>
+                      {notificationError}
+                    </Text>
+                  ) : null}
                   {notificationPermission === 'granted' &&
                   !notificationRegistrationFailed &&
                   !notificationRequesting ? null : (
