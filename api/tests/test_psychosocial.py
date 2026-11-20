@@ -18,6 +18,7 @@ from antang_api.psychosocial import (
     read_latest_assessment,
     render_guidance,
     score_answers,
+    score_who5,
 )
 from antang_api.routers.auth import router as auth_router
 from antang_api.routers.health_profile import router as health_profile_router
@@ -458,3 +459,107 @@ def test_score_answers_refuses_incomplete_or_foreign_choices() -> None:
                 "anxious-thought": 1,
             }
         )
+
+
+def test_who5_is_summed_and_scaled_to_a_percentage() -> None:
+    """WHO-5 原始分 0–25，乘 4 存百分比；缺题、越界照样报错。"""
+
+    assert (
+        score_who5(
+            {
+                "cheerful": 5,
+                "calm": 5,
+                "active": 5,
+                "rested": 5,
+                "interested": 5,
+            }
+        )
+        == 100
+    )
+    assert (
+        score_who5(
+            {
+                "cheerful": 4,
+                "calm": 4,
+                "active": 4,
+                "rested": 4,
+                "interested": 4,
+            }
+        )
+        == 80
+    )
+    assert (
+        score_who5(
+            {"cheerful": 0, "calm": 0, "active": 0, "rested": 0, "interested": 0}
+        )
+        == 0
+    )
+    with pytest.raises(ValueError, match="还有题没答"):
+        score_who5({"cheerful": 3})
+    with pytest.raises(ValueError, match="0 到 5"):
+        score_who5(
+            {
+                "cheerful": 6,
+                "calm": 3,
+                "active": 3,
+                "rested": 3,
+                "interested": 3,
+            }
+        )
+
+
+async def test_who5_rides_along_with_an_assessment(db_session: AsyncSession) -> None:
+    """WHO-5 是附加块：题目由服务端下发，分数也由服务端算，患者端改不了。"""
+
+    async for client in _client(db_session):
+        headers, _ = await _register(client)
+
+        instrument = await client.get(
+            "/api/v1/health-profile/psychosocial-instrument/who5",
+            headers=headers,
+        )
+        assert instrument.status_code == 200
+        payload = instrument.json()
+        assert payload["id"] == "who5"
+        assert len(payload["questions"]) == 5
+        # WHO-5 没有 Gold 题：App 依据空的 gold_options 决定不渲染那一段。
+        assert payload["gold_options"] == []
+
+        assessed_at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+        created = await client.post(
+            "/api/v1/health-profile/psychosocial-assessment",
+            headers=headers,
+            json={
+                "answers": [
+                    {"id": "repeat-test", "value": 4},
+                    {"id": "skip-exercise", "value": 2},
+                    {"id": "bedtime-snack", "value": 0},
+                    {"id": "night-worry", "value": 3},
+                    {"id": "alone-worry", "value": 1},
+                    {"id": "anxious-thought", "value": 0},
+                ],
+                "who5_answers": [
+                    {"id": "cheerful", "value": 4},
+                    {"id": "calm", "value": 3},
+                    {"id": "active", "value": 2},
+                    {"id": "rested", "value": 1},
+                    {"id": "interested", "value": 5},
+                ],
+                "gold_score": 2,
+                "instrument": "antang-behavior-v1",
+                "assessed_at": assessed_at.isoformat(),
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        row = await db_session.scalar(
+            select(PsychosocialAssessment).where(
+                PsychosocialAssessment.assessed_at == assessed_at
+            )
+        )
+        assert row is not None
+        # (4+3+2+1+5) = 15 → ×4 = 60。
+        assert row.who5_percent == 60
+        # 恐惧那两个分量表照旧由六道题算，没有被 WHO-5 影响。
+        assert row.fear_behavior_percent == 50
+        assert row.fear_worry_percent == 33

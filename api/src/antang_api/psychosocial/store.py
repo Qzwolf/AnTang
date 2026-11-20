@@ -52,6 +52,7 @@ async def record_assessment(
     gold_score: int | None,
     instrument: str,
     assessed_at: datetime,
+    who5_percent: int | None = None,
 ) -> PsychosocialAssessment:
     """写入一次评估。历史保留：前后测是判断这套设计是否有效的前提。"""
 
@@ -60,6 +61,7 @@ async def record_assessment(
         fear_behavior_percent=fear_behavior_percent,
         fear_worry_percent=fear_worry_percent,
         gold_score=gold_score,
+        who5_percent=who5_percent,
         instrument=instrument,
         assessed_at=assessed_at,
     )

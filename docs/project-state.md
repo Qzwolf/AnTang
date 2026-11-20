@@ -611,17 +611,64 @@ ruff 干净、pyright 0 errors（本机没有 `pyright.exe`，用 `.venv\Scripts
 本地那份 `9ae8449` 内容相同）。等 `github.com` 通了要 `git fetch team && git reset --hard
 team/aya/nav-v2-team-merge` 把两边对齐——**REST 推上去的提交和本地提交哈希不同，别装作没发生**。
 
+### 2026-10-30 深夜：每周最多联系几次，从「建议」变成真的闸门
 
+`psychosocial.support` 里的四象限剂量（高恐惧+感知受损 4、低恐惧+感知受损 5、其余 2/3，没评估按 3）一直只是写进提示词的一句话，模型可以不理；程序侧只有「两条日常问候至少隔 24 小时」这一条间隔。
 
+现在 `api/src/antang_api/proactive_care/quota.py` 数近七天真正发出去的主动消息（消息 + 任务 + 连起来的 `AgentRun`，和「最近一次主动联系」同一套口径），到上限就按下面的规则处理：
 
+- 还没到上限：照常起草。
+- 到上限且额度在任务过期前会腾出来：任务回 `SCHEDULED`，原因 `weekly_contact_limit`，`due_at` 设成「最早那条掉出七天窗口」的时刻。
+- 到上限且额度腾出来时任务已过期：任务 `EXPIRED`（原因 `weekly_contact_limit_expired`），并按用户自己的日常节奏排下一次，不让人从此收不到问候。
 
+没有心理社会评估时按中间档 3 次算；有评估结果就按四象限的剂量走。健康事件、一次性提醒、计划回访不受这条限制（它们本来就是 `must_send`）。
 
+测试：`api/tests/proactive_care/test_weekly_quota.py` 三例（中间档默认 3、四象限 4 次的边界、超过七天的不占名额）+ `test_processor.py` 两例（额度用完时把任务推到下一次可用时刻且不惊动起草 Agent；额度腾出来前任务已过期时排新任务）。后端全量 606 passed（4 个 Windows 上已知的 asyncio 用例失败，与本批无关），`ruff`、`pyright` 干净。
 
+### 2026-10-31：一周几次，让患者自己说了算
 
+上一批把「每周不超过 N 次」变成了真闸门，但 N 只由心理社会评估的四象限算出来——患者能在设置页看到这个数字，改不了。有人明明只想要一周一次，也有人希望多问两句；**次数是最该交给本人的参数**。
 
+- 数据：`proactive_care_settings.weekly_contact_limit`（可空，迁移 `n3c4d5e6f7a8`，CHECK `ck_proactive_care_weekly_limit` 限制 1–7）。空 = 跟着评估走；非空 = 患者自己定的。
+- 为什么不让填 0：0 次等于关掉日常问候，那是 `routine_cadence` 的开关。允许 0 会让设置页出现两个互相矛盾的「关掉」，也让人分不清「我关了」和「系统替我关了」（后者记在 `auto_paused_at`）。
+- 为什么封顶 7：一天不止一次的主动联系不是陪伴，是打扰；这条上限是产品边界，不是技术限制。
+- `quota.weekly_quota(..., preferred=)` 里患者定的优先，其次评估剂量，最后默认 3；`processor.py` 的日常问候分支把 `care_settings.weekly_contact_limit` 传进去。
+- 接口：`GET/PUT /api/v1/proactive-care/settings` 的 `weekly_contact_limit` 变为可写，响应多一个 `weekly_contact_limit_source`（`patient` / `assessment`），设置页才说得清「这个数字是你定的，还是评估算的」。PUT 传 `null` = 交回给评估。
 
+测试：`test_weekly_quota.py` 两例（患者选 1 次压过四象限的 4 次、填 99 被夹到 7）+ `test_processor.py` 一例（患者设 1 次时，只发过一条也要等到那条掉出七天）+ `test_routes.py` 一例（PUT 2 → `source=patient`；传 null → `source=assessment`；0 和 8 都被 422 拒绝）。后端全量 **610 passed**（4 个 Windows asyncio 用例失败，与本批无关）。
 
+### 2026-10-31（二）：问候几点到，也交给患者定
 
+次数定下来以后，剩下那个让人竖着耳朵的是**时间**：日常问候走「上次之后 + 间隔」的滚动时间，今天 07:12、明天 07:12、后天 08:30——时间一直在漂，患者没办法提前安排，只能一直留意手机。这不是次数问题，是可预测性问题：**能安排的提醒可以不理，猜不到的提醒必须等**。
 
+- 数据：`proactive_care_settings.check_in_hour`（可空，迁移 `o4d5e6f7a8b9`，CHECK `ck_proactive_care_check_in_hour` 限制 0–23）。空 = 沿用滚动时间；非空 = 患者自己定的本地整点。
+- 算法：`service._snap_to_local_hour(due_at, hour=…, zone_name=…)` 把「上次 + 间隔」换算到患者时区（`proactive_care_settings.timezone`），对齐到那个整点；整点已过就顺延一天。**固定时刻不会让间隔变短**——所以下午三点把「几点」设成九点，下一次是后天早上九点，而不是明天。
+- 改时间要重排：`schedule_routine_check_in(..., realign_existing=True)`（PUT 里 `previous_check_in_hour != request.check_in_hour` 时传），否则已经排好的那一次还挂在旧时间上。`reset_existing`（改节奏、患者刚说话）语义不变。
+- 接口：`check_in_hour` 可读可写，非法值（-1、24）422。
+- 为什么固定时刻算「抗报警疲劳」：随机/漂移的提醒制造的是持续警觉（得一直竖着耳朵、反复看手机），固定时刻把警觉成本压成一次「到点看一眼」；这也是设计稿里「固定时间可预测的签到」那条的具体落法。
 
+测试：`test_check_in_hour.py` 四例（选 9 点 → 本地 9:00 且过期时间跟着走；下午三点触发 → 落在后天 9:00；不选整点 → 一分不差等于 after+1 天；改整点后已排的那次要挪到新时间）+ `test_routes.py` 一例（PUT 9 → 回读 9；null → 回滚动；-1/24 → 422）。顺带修了两个会随日历过期的用例：`test_nutrition_routes.py` 的饮食、用药列表断言写死 2026-10-24，列表默认只看近 7/30 天，日期一过就变空——改成「两小时前」。后端全量 **615 passed**（4 个 Windows asyncio 用例失败，与本批无关）。
 
+### 2026-11-01：把团队分支合上线时，生产被自己的迁移卡住了
+
+第一次把合并后的分支部署到生产，api 容器起不来，`/health` 502，线上停了几分钟。原因不是代码，是**迁移图里两条线都改写同一个 CHECK，先跑的那条会把约束收窄**：
+
+- `u08fd1a24c37` 把 `ck_glucose_source` 收窄成 `('manual','report','public_dataset')`，`v19ae2b35d48` 再收窄成同集合 + `ohio_cgm`。生产库里已经有 94 条 manual、**17 条 fingerstick**、1 条 report、1 条 lab——ALTER TABLE 时 `check constraint "ck_glucose_source" ... is violated by some row`，迁移失败 → 容器启动失败。
+- 我在合并时加的 `m2a3b4c5d6e7` 只负责「最后」把约束并回 7 个值，管不了中间那两步。
+- 修法：把这两条迁移里的**约束值改成超集**（`manual/fingerstick/cgm/lab/report/public_dataset`，`v19ae2b35d48` 再加 `ohio_cgm`），并让 downgrade 也保持宽的那一份——收窄在降级时同样会立刻违约。语义没丢：最终值由合并点 `m2a3b4c5d6e7` 决定。
+- 回滚为什么没兜住：`deploy_pinned.sh` 里 `docker compose up` 在容器 unhealthy 时返回非零，`set -euo pipefail` 让脚本在「回滚自己」这一步之前就退了，`.env` 还停在新镜像上。手工恢复到上一个 `ANTANG_API_IMAGE`（`deploy-20261030-160502`）后服务回来；再部署修复版（`deploy-20261101-171404`）后 healthy、`alembic_version = o4d5e6f7a8b9`、17 条 fingerstick 一条没少。
+- 回归：新增 `test_personal_glucose_sources_survive_the_team_branch_upgrade`——在 `h1c2d3e4f5a6` 上先插 fingerstick/cgm/lab 三条，再 `upgrade head`，断言三条都在。本机 Windows 跑不了它（`asyncio.create_subprocess_exec` 在 Proactor 上 `NotImplementedError`，与另外两条迁移用例同一个已知限制），改用 alembic 手工演练验证：临时库 → `upgrade h1c2d3e4f5a6` → 插三条 → `upgrade head` → 约束是 7 值并集、三条数据都在。
+- 教训：**两条线改同一个 CHECK 时，先跑的必须是「宽」的那条**；合并点只能收尾，救不了中间。回滚脚本要单独测一次「回滚路径本身会不会因为 compose 返回非零而中断」。
+
+### 2026-11-01（二）：WHO-5 接进来，以及把「还缺什么」写进仓库
+
+WHO-5 五项身心健康指数是**免版税**的（世界卫生组织，署名即可），所以它是第一份「能拿去发表」的自评量表，不需要等授权。
+
+- 数据模型：`psychosocial_assessments` 加 `who5_percent`（0–100，可空，CHECK `ck_psychosocial_who5`；迁移 `p5e6f7a8b9c0`）。存百分比而不是原始分，与恐惧分量表一致：WHO-5 原始分 0–25，乘 4 得百分比，两者口径才可比。
+- **不并入象限**：WHO-5 量的是最近两周的整体状态，恐惧分量表量的是「怕低血糖」。把两者混成一个分数会让 `FEAR_HIGH_PERCENT = 50` 这个切点失去含义，所以只存、只给医护端看。
+- 计分在服务端：`score_who5()`（缺题/外题/越界都抛 ValueError），请求体带 `who5_answers: [{id, value}]`；它是**附加块**，不单独满足「这次提交要有分数」——WHO-5 不能替代恐惧分量表。
+- 题目也走服务端：新增 `GET /health-profile/psychosocial-instrument/who5`（五题、0–5 选项、`gold_options` 为空数组，App 据此不渲染 Gold 段）。换量表、改措辞都不用重装 App。
+- 测试：`test_who5_is_summed_and_scaled_to_a_percentage`（100/80/0 与两种报错）、`test_who5_rides_along_with_an_assessment`（题库 id/五题/空 gold；POST 后 `who5_percent == 60`，恐惧两个分量表仍是 50/33）。后端全量 **617 passed**，5 个失败全是 Windows `asyncio.create_subprocess_exec` 的已知限制。
+- 顺手写了 `docs/next-steps.md`：把「每周次数还差手机控件、话题冷却与行为触发没做、用患者的话查数据只做了第一层、题库等授权、CASE/Think Twice 要先定图存储与两稿审计」一次写清，避免下一个人从零猜。
+- 部署：镜像 `antang-api:deploy-20261101-*`，线上 `/health` ok、`alembic_version = p5e6f7a8b9c0`、`psychosocial_assessments` 已有 `who5_percent` 列、`/psychosocial-instrument/who5` 路由 401（要求登录，说明注册上了）。
+- 推送踩坑：REST 推 12 个文件时 GitHub 回 400，拆成两次推又多出一个提交 → 写 `deploy/squash_remote_head.py` 用同样的树接回原父提交再强移 ref；另外 GitHub 只认 40 位完整 sha，传短 sha 会 `422 parents must be exactly 40 characters`。

@@ -29,6 +29,8 @@ const settings: ProactiveCareSettings = {
   healthNotificationPreviewEnabled: false,
   weeklyContactCount: 3,
   weeklyContactLimit: 4,
+  weeklyContactLimitSource: 'assessment',
+  checkInHour: null,
   autoPaused: false,
   autoDowngradedAt: null,
 };
@@ -297,7 +299,134 @@ describe('CareSettingsModal', () => {
       quietHoursStart: '21:30',
       quietHoursEnd: '07:15',
       healthNotificationPreviewEnabled: true,
+      weeklyContactLimit: 4,
+      checkInHour: null,
     });
+    act(() => tree!.unmount());
+  });
+
+  test('lets the patient decide the cap and the hour instead of the scale', async () => {
+    const api = {
+      getProactiveCareSettings: jest
+        .fn()
+        .mockResolvedValue({ ...settings, weeklyContactLimit: null }),
+      putProactiveCareSettings: jest
+        .fn()
+        .mockImplementation((value: ProactiveCareSettings) =>
+          Promise.resolve(value),
+        ),
+    } as unknown as ApiClient;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    let tree: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <CareSettingsModal
+          api={api}
+          backgroundHealthEnabling={false}
+          backgroundHealthDisabling={false}
+          backgroundHealthError={null}
+          backgroundHealthStatus="disabled"
+          notificationPermission="granted"
+          notificationRegistrationFailed={false}
+          notificationRequesting={false}
+          onClose={jest.fn()}
+          onEnableBackgroundHealth={jest.fn()}
+          onDisableBackgroundHealth={jest.fn()}
+          onRequestNotificationPermission={jest.fn()}
+          visible
+        />,
+      );
+    });
+
+    // 没定过上限时先显示「暂按 3 次」，加一次就是 4 次，且来源变成患者自己。
+    act(() => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '每周上限加一次' })
+        .props.onPress();
+    });
+    expect(JSON.stringify(tree!.toJSON())).toContain('4 次');
+
+    // 问候时间默认「不固定」，第一次按加号落在早上九点（不是半夜）。
+    act(() => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '问候时间往后一小时' })
+        .props.onPress();
+    });
+    expect(JSON.stringify(tree!.toJSON())).toContain('09:00');
+
+    await act(async () => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '保存关怀设置' })
+        .props.onPress();
+    });
+
+    expect(api.putProactiveCareSettings).toHaveBeenCalledWith({
+      routineCadence: 'disabled',
+      planFollowUpEnabled: true,
+      healthEventsEnabled: false,
+      timezone,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00',
+      healthNotificationPreviewEnabled: false,
+      weeklyContactLimit: 4,
+      checkInHour: 9,
+    });
+    act(() => tree!.unmount());
+  });
+
+  test('hands the cap back to the assessment when the patient says so', async () => {
+    const api = {
+      getProactiveCareSettings: jest.fn().mockResolvedValue(settings),
+      putProactiveCareSettings: jest
+        .fn()
+        .mockImplementation((value: ProactiveCareSettings) =>
+          Promise.resolve(value),
+        ),
+    } as unknown as ApiClient;
+    let tree: ReturnType<typeof create>;
+
+    await act(async () => {
+      tree = create(
+        <CareSettingsModal
+          api={api}
+          backgroundHealthEnabling={false}
+          backgroundHealthDisabling={false}
+          backgroundHealthError={null}
+          backgroundHealthStatus="disabled"
+          notificationPermission="granted"
+          notificationRegistrationFailed={false}
+          notificationRequesting={false}
+          onClose={jest.fn()}
+          onEnableBackgroundHealth={jest.fn()}
+          onDisableBackgroundHealth={jest.fn()}
+          onRequestNotificationPermission={jest.fn()}
+          visible
+        />,
+      );
+    });
+
+    // 是评估算出来的时候没有「交回去」这个链接；先自己定一次，再交回去。
+    act(() => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '每周上限加一次' })
+        .props.onPress();
+    });
+    act(() => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '每周上限跟着沟通方式自评走' })
+        .props.onPress();
+    });
+
+    await act(async () => {
+      tree!.root
+        .findByProps({ accessibilityLabel: '保存关怀设置' })
+        .props.onPress();
+    });
+
+    expect(api.putProactiveCareSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ weeklyContactLimit: null }),
+    );
     act(() => tree!.unmount());
   });
 

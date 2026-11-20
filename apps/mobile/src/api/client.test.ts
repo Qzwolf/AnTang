@@ -874,6 +874,8 @@ describe('ApiClient proactive care settings', () => {
         quietHoursStart: '21:30',
         quietHoursEnd: '07:15',
         healthNotificationPreviewEnabled: true,
+        weeklyContactLimit: 2,
+        checkInHour: 9,
       }),
     ).resolves.toMatchObject({
       routineCadence: 'every_3_days',
@@ -893,6 +895,8 @@ describe('ApiClient proactive care settings', () => {
       quiet_hours_start: '21:30',
       quiet_hours_end: '07:15',
       health_notification_preview_enabled: true,
+      weekly_contact_limit: 2,
+      check_in_hour: 9,
     });
   });
 });

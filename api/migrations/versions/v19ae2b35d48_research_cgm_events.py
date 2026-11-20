@@ -8,10 +8,15 @@ down_revision = 'u08fd1a24c37'
 branch_labels = None
 depends_on = None
 
+# Superset of the sources this branch knows about, so the check can be replaced on
+# a database that already holds ``fingerstick``/``cgm``/``lab`` readings. The final
+# list is settled in the merge revision ``m2a3b4c5d6e7``.
+_SOURCES = "'manual','fingerstick','cgm','lab','report','public_dataset','ohio_cgm'"
+
 
 def upgrade() -> None:
     op.drop_constraint('ck_glucose_source', 'glucose_readings', type_='check')
-    op.create_check_constraint('ck_glucose_source', 'glucose_readings', "source IN ('manual','report','public_dataset','ohio_cgm')")
+    op.create_check_constraint('ck_glucose_source', 'glucose_readings', f"source IN ({_SOURCES})")
     op.create_table('study_subjects',
         sa.Column('user_id', sa.Uuid(), sa.ForeignKey('users.id', ondelete='CASCADE'), primary_key=True),
         sa.Column('dataset', sa.String(64), nullable=False),
@@ -40,5 +45,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table('study_events')
     op.drop_table('study_subjects')
+    # Keep the wide check on the way down too: narrowing it would immediately break
+    # readings this revision never wrote (fingerstick/cgm/lab) and the downgrade
+    # would stop half way.
     op.drop_constraint('ck_glucose_source', 'glucose_readings', type_='check')
-    op.create_check_constraint('ck_glucose_source', 'glucose_readings', "source IN ('manual','report','public_dataset')")
+    op.create_check_constraint('ck_glucose_source', 'glucose_readings', f"source IN ({_SOURCES})")

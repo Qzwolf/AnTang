@@ -108,6 +108,81 @@ def current_instrument() -> Instrument:
     return SELF_REPORT_INSTRUMENT
 
 
+WHO5_SCALE = (
+    InstrumentOption(value=5, label="一直"),
+    InstrumentOption(value=4, label="大部分时间"),
+    InstrumentOption(value=3, label="超过一半时间"),
+    InstrumentOption(value=2, label="少于一半时间"),
+    InstrumentOption(value=1, label="偶尔"),
+    InstrumentOption(value=0, label="从未"),
+)
+
+WHO5_INSTRUMENT = Instrument(
+    id="who5",
+    title="最近两周的整体状态",
+    instructions="五句话，回忆最近两周。选每句话对你来说有多常成立，没有对错。",
+    disclaimer=(
+        "这是世界卫生组织五项身心健康指数（WHO-5），可以免费使用，"
+        "按原量表计分；它不是诊断工具，只用来记录这段时间的整体状态。"
+    ),
+    options=WHO5_SCALE,
+    questions=(
+        InstrumentQuestion(
+            id="cheerful",
+            kind="behavior",
+            text="我感到愉快、情绪好。",
+        ),
+        InstrumentQuestion(
+            id="calm",
+            kind="behavior",
+            text="我感到平静和放松。",
+        ),
+        InstrumentQuestion(
+            id="active",
+            kind="behavior",
+            text="我感到精力充沛、有活力。",
+        ),
+        InstrumentQuestion(
+            id="rested",
+            kind="behavior",
+            text="我醒来时觉得神清气爽、休息够了。",
+        ),
+        InstrumentQuestion(
+            id="interested",
+            kind="behavior",
+            text="我的日常生活里有让我感兴趣的事情。",
+        ),
+    ),
+    # WHO-5 没有 Gold 题，这两个字段留空字符串，App 依据 id 决定要不要渲染。
+    gold_label="",
+    gold_hint="",
+    gold_options=(),
+)
+
+
+def score_who5(answers: Mapping[str, int]) -> int:
+    """WHO-5 原始分 0–25，换算成 0–100 的百分比（原始分 × 4）。
+
+    0 分是「五句话几乎都不成立」，100 分是「一直成立」。低于 50 分在文献里被当作
+    需要进一步评估的提示，所以这里保留整数百分比，不做四舍五入的花活。
+    """
+
+    questions = {question.id for question in WHO5_INSTRUMENT.questions}
+    allowed = {option.value for option in WHO5_INSTRUMENT.options}
+
+    unknown = [question_id for question_id in answers if question_id not in questions]
+    if unknown:
+        raise ValueError(f"没有这道题：{unknown[0]}")
+    missing = [question_id for question_id in questions if question_id not in answers]
+    if missing:
+        raise ValueError(f"还有题没答：{missing[0]}")
+    for question_id, value in answers.items():
+        if value not in allowed:
+            raise ValueError("WHO-5 的选项只能是 0 到 5")
+
+    return sum(answers[question_id] for question_id in questions) * 4
+
+
 def score_answers(answers: Mapping[str, int]) -> tuple[int, int]:
     """把逐题答案折成（行为百分比, 担忧百分比）。
 

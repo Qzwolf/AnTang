@@ -64,7 +64,7 @@ async def test_existing_local_and_server_branches_upgrade_without_losing_users(p
             if parent == "k48e9f1a6b52":
                 await connection.execute(
                     text(
-                        "UPDATE users SET role = 'clinician', full_name = '保留姓名' WHERE id = :id"
+                        "UPDATE users SET role = 'clinician', full_name = '淇濈暀濮撳悕' WHERE id = :id"
                     ),
                     {"id": user_id},
                 )
@@ -77,7 +77,7 @@ async def test_existing_local_and_server_branches_upgrade_without_losing_users(p
                 )
             ).one()
             assert row.role == ("clinician" if parent == "k48e9f1a6b52" else "patient")
-            assert row.full_name == ("保留姓名" if parent == "k48e9f1a6b52" else None)
+            assert row.full_name == ("淇濈暀濮撳悕" if parent == "k48e9f1a6b52" else None)
             tables = await connection.run_sync(
                 lambda sync: set(inspect(sync).get_table_names())
             )
@@ -86,7 +86,7 @@ async def test_existing_local_and_server_branches_upgrade_without_losing_users(p
                 await connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 )
-            ).scalar_one() == "m2a3b4c5d6e7"
+            ).scalar_one() == "p5e6f7a8b9c0"
     finally:
         await database.dispose()
         async with admin.connect() as connection:
@@ -96,4 +96,73 @@ async def test_existing_local_and_server_branches_upgrade_without_losing_users(p
 
 def test_unified_schema_has_one_head():
     config = Config(str(API / "alembic.ini"))
-    assert ScriptDirectory.from_config(config).get_heads() == ["m2a3b4c5d6e7"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["p5e6f7a8b9c0"]
+
+
+async def test_personal_glucose_sources_survive_the_team_branch_upgrade():
+    """The team branch rewrote ck_glucose_source; a live database already holds
+    fingerstick/cgm/lab readings, so the rewrite must not narrow the check."""
+    original = make_url(settings.database_url)
+    assert original.database is not None and original.database.startswith(
+        "antang_test_"
+    )
+    name = "antang_test_sources_" + uuid4().hex
+    url = original.set(database=name).render_as_string(hide_password=False)
+    admin = create_async_engine(settings.database_url, isolation_level="AUTOCOMMIT")
+    database = create_async_engine(url)
+    user_id = uuid4()
+
+    async def upgrade(revision):
+        environment = dict(os.environ, DATABASE_URL=url)
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "alembic",
+            "upgrade",
+            revision,
+            cwd=API,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        assert process.returncode == 0, (stdout + stderr).decode()
+
+    async with admin.connect() as connection:
+        await connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        await upgrade("h1c2d3e4f5a6")
+        async with database.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, username, username_normalized, password_hash) "
+                    "VALUES (:id, 'merge-glucose-user', 'merge-glucose-user', 'test-only')"
+                ),
+                {"id": user_id},
+            )
+            for source, value in (("fingerstick", 130), ("cgm", 145), ("lab", 99)):
+                await connection.execute(
+                    text(
+                        "INSERT INTO glucose_readings "
+                        "(id, user_id, value_mg_dl, measured_at, source) "
+                        "VALUES (:id, :user, :value, now(), :source)"
+                    ),
+                    {"id": uuid4(), "user": user_id, "value": value, "source": source},
+                )
+        await upgrade("head")
+        async with database.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT source FROM glucose_readings WHERE user_id = :id "
+                        "ORDER BY source"
+                    ),
+                    {"id": user_id},
+                )
+            ).scalars().all()
+            assert rows == ["cgm", "fingerstick", "lab"]
+    finally:
+        await database.dispose()
+        async with admin.connect() as connection:
+            await connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        await admin.dispose()

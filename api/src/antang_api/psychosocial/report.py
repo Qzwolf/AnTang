@@ -34,6 +34,7 @@ def clinician_assessment_response(
         awareness=profile.awareness,
         quadrant=profile.quadrant,
         weekly_contact_limit=profile.weekly_contact_limit,
+        who5_percent=row.who5_percent,
     )
 
 

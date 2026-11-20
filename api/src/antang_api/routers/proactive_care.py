@@ -48,9 +48,14 @@ async def _with_budget(
 
     payload = ProactiveCareSettingsPayload.model_validate(care_settings)
     profile = await read_latest_assessment(session, user_id)
-    payload.weekly_contact_limit = (
-        profile.weekly_contact_limit if profile is not None else None
-    )
+    if care_settings.weekly_contact_limit is None:
+        # 患者没自己定，就把评估算出来的剂量显示给他看，并说明是评估给的。
+        payload.weekly_contact_limit = (
+            profile.weekly_contact_limit if profile is not None else None
+        )
+        payload.weekly_contact_limit_source = "assessment"
+    else:
+        payload.weekly_contact_limit_source = "patient"
     count = await session.scalar(
         select(func.count())
         .select_from(Message)
@@ -118,6 +123,7 @@ async def put_care_settings(
         )
 
     previous_cadence = care_settings.routine_cadence
+    previous_check_in_hour = care_settings.check_in_hour
     care_settings.routine_cadence = request.routine_cadence
     if (
         request.routine_cadence != RoutineCareCadence.DISABLED
@@ -132,6 +138,10 @@ async def put_care_settings(
     care_settings.timezone = request.timezone
     care_settings.quiet_hours_start = request.quiet_hours_start
     care_settings.quiet_hours_end = request.quiet_hours_end
+    # null = 交回给评估决定；非空就是患者自己定的次数（schema 已限制 1–7）。
+    care_settings.weekly_contact_limit = request.weekly_contact_limit
+    # 几点收到问候：患者自己定的整点。改了就要把已经排好的下一次重排。
+    care_settings.check_in_hour = request.check_in_hour
     care_settings.health_notification_preview_enabled = (
         request.health_notification_preview_enabled
     )
@@ -140,6 +150,7 @@ async def put_care_settings(
         user_id=authenticated.user.id,
         after=datetime.now(timezone.utc),
         reset_existing=previous_cadence != request.routine_cadence,
+        realign_existing=previous_check_in_hour != request.check_in_hour,
     )
     await session.commit()
     return await _with_budget(

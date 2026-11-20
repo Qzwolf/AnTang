@@ -727,6 +727,9 @@ export class ApiClient {
           quiet_hours_end: settings.quietHoursEnd,
           health_notification_preview_enabled:
             settings.healthNotificationPreviewEnabled,
+          // 两个可以自己定的数：null 表示「交回量表算 / 不固定整点」。
+          weekly_contact_limit: settings.weeklyContactLimit,
+          check_in_hour: settings.checkInHour,
         }),
       },
     );

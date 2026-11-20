@@ -115,18 +115,31 @@ export type ProactiveCareSettings = {
   healthNotificationPreviewEnabled: boolean;
   /** 本周已经主动联系过几次（服务端按自然周算）。 */
   weeklyContactCount: number;
-  /** 量表给的每周上限；没做过量表时为空。 */
+  /** 每周上限（生效值）：患者自己定的，或者按量表算的。 */
   weeklyContactLimit: number | null;
+  /** 这个上限是谁定的：patient = 患者自己填的，assessment = 按评估结果。 */
+  weeklyContactLimitSource: "patient" | "assessment";
+  /** 日常问候落在本地几点（整点）；null = 沿用滚动时间。 */
+  checkInHour: number | null;
   /** 因为连续没回应，系统替用户暂停了日常问候。 */
   autoPaused: boolean;
   autoDowngradedAt: string | null;
 };
 
 /** 用户可以改的部分；次数与自动暂停是服务端算出来的，提交时不带。 */
-export type ProactiveCareSettingsInput = Omit<
-  ProactiveCareSettings,
-  "weeklyContactCount" | "weeklyContactLimit" | "autoPaused" | "autoDowngradedAt"
->;
+export type ProactiveCareSettingsInput = {
+  routineCadence: RoutineCareCadence;
+  planFollowUpEnabled: boolean;
+  healthEventsEnabled: boolean;
+  timezone: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  healthNotificationPreviewEnabled: boolean;
+  /** null = 交回量表算（不自己定）。 */
+  weeklyContactLimit: number | null;
+  /** null = 不固定整点，按滚动时间。 */
+  checkInHour: number | null;
+};
 
 export type HealthProfileCard = {
   id: string;
@@ -976,6 +989,13 @@ export function parseProactiveCareSettings(
             data.weekly_contact_limit,
             "care settings.weekly_contact_limit",
           ),
+    // 老后端没有这两个字段：按「跟着评估走、不固定整点」处理。
+    weeklyContactLimitSource:
+      data.weekly_contact_limit_source === "patient" ? "patient" : "assessment",
+    checkInHour:
+      data.check_in_hour === null || data.check_in_hour === undefined
+        ? null
+        : integerValue(data.check_in_hour, "care settings.check_in_hour"),
     autoPaused: data.auto_paused === true,
     autoDowngradedAt:
       typeof data.auto_downgraded_at === "string"

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,31 @@ _ROUTINE_INTERVALS = {
 # 阈值取 2/3：一次没回可能只是忙，两次就是「这个时间点不合适」。
 _QUIET_DOWNGRADE_AFTER = 2
 _QUIET_PAUSE_AFTER = 3
+
+
+def _snap_to_local_hour(
+    due_at: datetime,
+    *,
+    hour: int | None,
+    zone_name: str,
+) -> datetime:
+    """把「上次之后 + 间隔」的时间对齐到患者自己定的整点。
+
+    滚动时间会漂移：今天 07:12、明天 07:12、后天 08:30……患者没法提前安排。
+    固定整点让人知道「每天早上九点它才会说话」，剩下的时间可以放心不竖耳朵。
+    """
+
+    if hour is None:
+        return due_at
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return due_at
+    local = due_at.astimezone(zone)
+    snapped = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if snapped < local:
+        snapped += timedelta(days=1)
+    return snapped.astimezone(timezone.utc)
 
 
 async def _unanswered_routine_streak(
@@ -122,6 +148,7 @@ async def schedule_routine_check_in(
     user_id: UUID,
     after: datetime,
     reset_existing: bool,
+    realign_existing: bool = False,
 ) -> UUID | None:
     """确保已开启日常关怀的用户始终有下一次候选任务。"""
 
@@ -155,12 +182,18 @@ async def schedule_routine_check_in(
             scheduled.finished_at = after
         return None
 
-    due_at = after + interval
+    due_at = _snap_to_local_hour(
+        after + interval,
+        hour=care_settings.check_in_hour,
+        zone_name=care_settings.timezone,
+    )
     if scheduled is not None:
-        if reset_existing:
+        if reset_existing or realign_existing:
+            # 改了节奏或改了「几点」：下一次要按新规则重排，不能还挂在旧时间上。
             scheduled.due_at = due_at
             scheduled.expires_at = due_at + timedelta(hours=12)
-            scheduled.outcome_reason = None
+            if reset_existing:
+                scheduled.outcome_reason = None
         return scheduled.id
 
     scheduled = ProactiveCareTask(

@@ -1,7 +1,9 @@
 from antang_api.psychosocial.instrument import (
+    WHO5_INSTRUMENT,
     Instrument,
     current_instrument,
     score_answers,
+    score_who5,
 )
 from antang_api.psychosocial.store import (
     read_latest_assessment,
@@ -20,10 +22,12 @@ __all__ = [
     "FEAR_HIGH_PERCENT",
     "Instrument",
     "PsychosocialProfile",
+    "WHO5_INSTRUMENT",
     "current_instrument",
     "read_latest_assessment",
     "read_latest_assessment_row",
     "record_assessment",
     "render_guidance",
     "score_answers",
+    "score_who5",
 ]

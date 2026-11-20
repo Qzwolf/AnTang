@@ -89,11 +89,13 @@ from antang_api.health_profile.wearable_service import (
 )
 from antang_api.proactive_care.service import record_health_import
 from antang_api.psychosocial import (
+    WHO5_INSTRUMENT,
     Instrument,
     current_instrument,
     read_latest_assessment_row,
     record_assessment,
     score_answers,
+    score_who5,
 )
 from antang_api.psychosocial.report import patient_assessment_response
 from antang_api.models import (
@@ -519,6 +521,22 @@ async def get_psychosocial_instrument(
     return _instrument_response(current_instrument())
 
 
+@router.get(
+    "/psychosocial-instrument/who5",
+    response_model=PsychosocialInstrumentResponse,
+)
+async def get_who5_instrument(
+    user: Annotated[User, Depends(get_patient_user)],
+) -> PsychosocialInstrumentResponse:
+    """WHO-5 那份题库。
+
+    它不带 Gold 题（`gold_options` 是空数组），App 依 id 决定渲染哪一段。
+    """
+
+    del user
+    return _instrument_response(WHO5_INSTRUMENT)
+
+
 def _psychosocial_response(row: PsychosocialAssessment) -> PsychosocialProfileResponse:
     # 患者端只回行为结果（每周几次）；分数与象限走医护端，见 psychosocial/report.py。
     return patient_assessment_response(row)
@@ -564,6 +582,18 @@ async def record_psychosocial_assessment(
         worry_percent = request.fear_worry_percent
         if behavior_percent is None or worry_percent is None:
             raise HTTPException(status_code=422, detail="要么带逐题答案，要么带两个百分比")
+    who5_percent: int | None = None
+    if request.who5_answers is not None:
+        # 与上面同理：WHO-5 的分数也在服务端算，客户端上传不了「我希望是多少分」。
+        who5_ids = [answer.id for answer in request.who5_answers]
+        if len(set(who5_ids)) != len(who5_ids):
+            raise HTTPException(status_code=422, detail="同一道题提交了两次")
+        try:
+            who5_percent = score_who5(
+                {answer.id: answer.value for answer in request.who5_answers}
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
     row = await record_assessment(
         session,
         user_id=user.id,
@@ -572,6 +602,7 @@ async def record_psychosocial_assessment(
         gold_score=request.gold_score,
         instrument=request.instrument,
         assessed_at=request.assessed_at,
+        who5_percent=who5_percent,
     )
     response = _psychosocial_response(row)
     await session.commit()

@@ -41,6 +41,10 @@ class PsychosocialAssessment(Base):
             "gold_score IS NULL OR (gold_score BETWEEN 1 AND 7)",
             name="ck_psychosocial_gold_score",
         ),
+        CheckConstraint(
+            "who5_percent IS NULL OR (who5_percent BETWEEN 0 AND 100)",
+            name="ck_psychosocial_who5",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -54,6 +58,9 @@ class PsychosocialAssessment(Base):
     fear_worry_percent: Mapped[int] = mapped_column(Integer)
     # Gold 计分法：1 表示总能察觉低血糖，7 表示从来察觉不到，>= 4 视为感知受损。
     gold_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # WHO-5 换算成 0–100 的百分比（原始分 0–25 × 4）。它量的是「最近两周整体状态」，
+    # 与低血糖恐惧不是同一个维度，所以单独一列，不并进上面两个分量表。
+    who5_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     instrument: Mapped[str] = mapped_column(String(64))
     assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(

@@ -42,6 +42,7 @@ Gold score 缺失时不猜，落到 `unknown_awareness`，用默认接触频率�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/v1/health-profile/psychosocial-instrument` | 返回当前题库：说明、选项、题干、Gold 题 |
+| `GET` | `/api/v1/health-profile/psychosocial-instrument/who5` | WHO-5 的题库（五题、0–5 选项、没有 Gold 题） |
 | `GET` | `/api/v1/health-profile/psychosocial-assessment` | 患者端读自己最新一次档位；没有则返回 `null` |
 | `POST` | `/api/v1/health-profile/psychosocial-assessment` | 写入一次评估，返回算出来的档位 |
 | `GET` | `/api/v1/patients/{patient_id}/psychosocial-assessment` | **医护端**读分数，需要患者授权；没有则返回 `null` |
@@ -56,6 +57,7 @@ Gold score 缺失时不猜，落到 `unknown_awareness`，用默认接触频率�
 |---|---|
 | `answers` | 逐题选择，推荐方式；服务端负责算分，换量表连计分都不用改客户端 |
 | `fear_behavior_percent` / `fear_worry_percent` | 0–100，旧客户端用；`answers` 存在时被忽略 |
+| `who5_answers` | 附加块：WHO-5 五题的逐题选择，服务端算 0–100 的 `who5_percent`；**不能替代**恐惧分量表 |
 | `gold_score` | 1–7 或 `null` |
 | `instrument` | 题库 id，原样回传 |
 | `assessed_at` | **必须带时区** |
@@ -84,6 +86,7 @@ Gold score 缺失时不猜，落到 `unknown_awareness`，用默认接触频率�
 | `instrument` | 题目来源 | 能不能拿去发表 |
 |---|---|---|
 | `antang-behavior-v1` | 我们自己写的 6 条行为/担忧题 + 1 题察觉评分（Gold 计分法） | 不能，只能作为产品内部档位 |
+| `who5` | WHO-5 五项身心健康指数（世界卫生组织，免版税，需注明出处） | 能，按 WHO 的署名要求引用 |
 | `HFS-II` / `CHFS` / `PHFS-II` / `HFS-98` | 官方授权版本（**授权申请中**） | 能，需按条款引用 |
 
 为什么要分开两个值，而不是等授权到了再一起做：

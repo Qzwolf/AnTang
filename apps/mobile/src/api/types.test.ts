@@ -476,6 +476,8 @@ describe('proactive care settings', () => {
       // 旧后端不带打扰预算字段：按「没算过、没暂停」处理，不报错。
       weeklyContactCount: 0,
       weeklyContactLimit: null,
+      weeklyContactLimitSource: 'assessment',
+      checkInHour: null,
       autoPaused: false,
       autoDowngradedAt: null,
     });
@@ -484,12 +486,16 @@ describe('proactive care settings', () => {
         ...response,
         weekly_contact_count: 2,
         weekly_contact_limit: 4,
+        weekly_contact_limit_source: 'patient',
+        check_in_hour: 9,
         auto_paused: true,
         auto_downgraded_at: '2026-10-20T01:00:00Z',
       }),
     ).toMatchObject({
       weeklyContactCount: 2,
       weeklyContactLimit: 4,
+      weeklyContactLimitSource: 'patient',
+      checkInHour: 9,
       autoPaused: true,
       autoDowngradedAt: '2026-10-20T01:00:00Z',
     });

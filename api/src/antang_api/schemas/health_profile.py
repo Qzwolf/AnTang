@@ -545,6 +545,7 @@ class PsychosocialAssessmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     answers: list[InstrumentAnswerRequest] | None = None
+    who5_answers: list[InstrumentAnswerRequest] | None = None
     fear_behavior_percent: Annotated[int, Field(ge=0, le=100)] | None = None
     fear_worry_percent: Annotated[int, Field(ge=0, le=100)] | None = None
     gold_score: Annotated[int | None, Field(ge=1, le=7)] = None
@@ -562,7 +563,11 @@ class PsychosocialAssessmentRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_a_score(self) -> "PsychosocialAssessmentRequest":
-        """逐题答案与两个百分比至少要有一份，否则这次提交没有意义。"""
+        """逐题答案与两个百分比至少要有一份，否则这次提交没有意义。
+
+        WHO-5（`who5_answers`）是搭在同一次评估里的附加块：它量的是最近两周的
+        整体状态，不能替代低血糖恐惧那两个分量表，所以不单独满足这条校验。
+        """
 
         if self.answers is None and (
             self.fear_behavior_percent is None or self.fear_worry_percent is None
@@ -638,6 +643,9 @@ class ClinicianPsychosocialResponse(BaseModel):
         "unknown_awareness",
     ]
     weekly_contact_limit: int
+    # WHO-5 换算成 0–100（原始分 0–25 × 4）。它量的是最近两周的整体状态，
+    # 与低血糖恐惧并列展示，不参与象限判定。
+    who5_percent: int | None = None
 
 
 class BeliefNodeResponse(BaseModel):

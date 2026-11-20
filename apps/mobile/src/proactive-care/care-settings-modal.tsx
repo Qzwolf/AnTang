@@ -46,6 +46,30 @@ const cadenceOptions: { value: RoutineCareCadence; label: string }[] = [
   { value: 'weekly', label: '每周' },
 ];
 
+// 没做过量表、也没自己定过上限时，先按保守的三次算（与服务端
+// `proactive_care/quota.py` 的 DEFAULT_WEEKLY_LIMIT 一致）。
+const DEFAULT_WEEKLY_LIMIT = 3;
+const MAX_WEEKLY_LIMIT = 7;
+// 选「几点收到」时的起点：不固定的人先看到早上九点，比半夜合理。
+const DEFAULT_CHECK_IN_HOUR = 9;
+
+function clamp(value: number, low: number, high: number): number {
+  return Math.min(high, Math.max(low, value));
+}
+
+function hourLabel(hour: number): string {
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+// 原本不固定时，按「加」落在九点、按「减」落在八点——先给一个像样的整点，
+// 而不是从九点再加一小时变成十点。
+function steppedHour(current: number | null, delta: 1 | -1): number {
+  if (current !== null) {
+    return clamp(current + delta, 0, 23);
+  }
+  return delta > 0 ? DEFAULT_CHECK_IN_HOUR : DEFAULT_CHECK_IN_HOUR - 1;
+}
+
 const permissionLabels: Record<PushPermission, string> = {
   undetermined: '尚未选择',
   denied: '系统通知已关闭，请到 Android 设置中开启',
@@ -144,6 +168,8 @@ export function CareSettingsModal({
         quietHoursEnd: settings.quietHoursEnd,
         healthNotificationPreviewEnabled:
           settings.healthNotificationPreviewEnabled,
+        weeklyContactLimit: settings.weeklyContactLimit,
+        checkInHour: settings.checkInHour,
       });
       setSettings(saved);
       onClose();
@@ -277,6 +303,119 @@ export function CareSettingsModal({
                       ? '，上限按沟通方式自评来算。'
                       : ` · 上限 ${settings.weeklyContactLimit} 次。`}
                   </Text>
+                  <View style={styles.divider} />
+                  <Text style={styles.sectionTitle}>一周最多几次</Text>
+                  <Text style={styles.description}>
+                    {settings.weeklyContactLimitSource === 'patient'
+                      ? '这个数是你自己定的，优先于沟通方式自评算出来的上限。'
+                      : '现在是按沟通方式自评算出来的上限，你也可以自己定一个。'}
+                  </Text>
+                  <View style={styles.stepperRow}>
+                    <Pressable
+                      accessibilityLabel="每周上限减一次"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() =>
+                        update({
+                          weeklyContactLimit: clamp(
+                            (settings.weeklyContactLimit ??
+                              DEFAULT_WEEKLY_LIMIT) - 1,
+                            1,
+                            MAX_WEEKLY_LIMIT,
+                          ),
+                          weeklyContactLimitSource: 'patient',
+                        })
+                      }
+                      style={styles.stepperButton}
+                    >
+                      <Text style={styles.stepperButtonText}>−</Text>
+                    </Pressable>
+                    <Text selectable style={styles.stepperValue}>
+                      {settings.weeklyContactLimit === null
+                        ? `暂按 ${DEFAULT_WEEKLY_LIMIT} 次`
+                        : `${settings.weeklyContactLimit} 次`}
+                    </Text>
+                    <Pressable
+                      accessibilityLabel="每周上限加一次"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() =>
+                        update({
+                          weeklyContactLimit: clamp(
+                            (settings.weeklyContactLimit ??
+                              DEFAULT_WEEKLY_LIMIT) + 1,
+                            1,
+                            MAX_WEEKLY_LIMIT,
+                          ),
+                          weeklyContactLimitSource: 'patient',
+                        })
+                      }
+                      style={styles.stepperButton}
+                    >
+                      <Text style={styles.stepperButtonText}>+</Text>
+                    </Pressable>
+                  </View>
+                  {settings.weeklyContactLimitSource === 'patient' ? (
+                    <Pressable
+                      accessibilityLabel="每周上限跟着沟通方式自评走"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() =>
+                        update({
+                          weeklyContactLimit: null,
+                          weeklyContactLimitSource: 'assessment',
+                        })
+                      }
+                    >
+                      <Text style={styles.linkText}>跟着沟通方式自评走</Text>
+                    </Pressable>
+                  ) : null}
+                  <View style={styles.divider} />
+                  <Text style={styles.sectionTitle}>几点收到</Text>
+                  <Text style={styles.description}>
+                    {settings.checkInHour === null
+                      ? '现在没有固定时间，按你上次聊天的时间往后推。固定在整点更可预期，比随机弹消息省心。'
+                      : `固定在 ${hourLabel(settings.checkInHour)} 前后，按你手机的时区算。`}
+                  </Text>
+                  <View style={styles.stepperRow}>
+                    <Pressable
+                      accessibilityLabel="问候时间往前一小时"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() =>
+                        update({ checkInHour: steppedHour(settings.checkInHour, -1) })
+                      }
+                      style={styles.stepperButton}
+                    >
+                      <Text style={styles.stepperButtonText}>−</Text>
+                    </Pressable>
+                    <Text selectable style={styles.stepperValue}>
+                      {settings.checkInHour === null
+                        ? '不固定'
+                        : hourLabel(settings.checkInHour)}
+                    </Text>
+                    <Pressable
+                      accessibilityLabel="问候时间往后一小时"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() =>
+                        update({ checkInHour: steppedHour(settings.checkInHour, 1) })
+                      }
+                      style={styles.stepperButton}
+                    >
+                      <Text style={styles.stepperButtonText}>+</Text>
+                    </Pressable>
+                  </View>
+                  {settings.checkInHour !== null ? (
+                    <Pressable
+                      accessibilityLabel="取消固定问候时间"
+                      accessibilityRole="button"
+                      disabled={disabled}
+                      onPress={() => update({ checkInHour: null })}
+                    >
+                      <Text style={styles.linkText}>不固定了</Text>
+                    </Pressable>
+                  ) : null}
                   {settings.autoPaused ? (
                     <View style={styles.pausedCard}>
                       <Text style={styles.pausedText}>
@@ -298,6 +437,8 @@ export function CareSettingsModal({
                               quietHoursEnd: settings.quietHoursEnd,
                               healthNotificationPreviewEnabled:
                                 settings.healthNotificationPreviewEnabled,
+                              weeklyContactLimit: settings.weeklyContactLimit,
+                              checkInHour: settings.checkInHour,
                             })
                             .then(
                               (saved) => {
@@ -641,6 +782,37 @@ const styles = StyleSheet.create({
   divider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.line,
+  },
+  stepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  stepperButton: {
+    minWidth: 44,
+    paddingVertical: spacing.xs,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+  },
+  stepperButtonText: {
+    color: colors.text,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 16,
+  },
+  stepperValue: {
+    flex: 1,
+    textAlign: 'center',
+    color: colors.text,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 15,
+  },
+  linkText: {
+    color: colors.primary,
+    fontFamily: typefaces.sansMedium,
+    fontSize: 12,
   },
   statusCard: {
     flexDirection: 'row',

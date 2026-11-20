@@ -132,6 +132,18 @@ class ProactiveCareSettings(Base):
         default=0,
         server_default="0",
     )
+    # 患者自己定的「一周最多主动联系几次」。空 = 跟着心理社会评估的四象限剂量走。
+    # 只让调 1–7：0 次等于关掉日常问候，那是 routine_cadence 的开关，不该藏在次数里。
+    weekly_contact_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    # 患者自己定的「几点收到日常问候」（0–23 本地小时）。空 = 沿用「上次之后 + 间隔」的滚动时间。
+    # 固定时刻比随机时刻省心：可预测的提醒还能安排，猜不到的提醒会让人一直竖着耳朵。
+    check_in_hour: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     auto_downgraded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -149,6 +161,18 @@ class ProactiveCareSettings(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "weekly_contact_limit IS NULL OR "
+            "(weekly_contact_limit >= 1 AND weekly_contact_limit <= 7)",
+            name="ck_proactive_care_weekly_limit",
+        ),
+        CheckConstraint(
+            "check_in_hour IS NULL OR (check_in_hour >= 0 AND check_in_hour <= 23)",
+            name="ck_proactive_care_check_in_hour",
+        ),
     )
 
 
